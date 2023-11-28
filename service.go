@@ -9,8 +9,8 @@ import (
 	"github.com/restaking-cloud/native-delegation-for-plus/ethservice"
 	ethConfig "github.com/restaking-cloud/native-delegation-for-plus/ethservice/config"
 
-	"github.com/pon-pbs/mev-plus/common"
-	coreCommon "github.com/pon-pbs/mev-plus/core/common"
+	"github.com/pon-network/mev-plus/common"
+	coreCommon "github.com/pon-network/mev-plus/core/common"
 	"github.com/restaking-cloud/native-delegation-for-plus/beacon"
 	beaconConfig "github.com/restaking-cloud/native-delegation-for-plus/beacon/config"
 	k2common "github.com/restaking-cloud/native-delegation-for-plus/common"

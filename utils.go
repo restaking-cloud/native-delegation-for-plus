@@ -11,7 +11,7 @@ import (
 
 	apiv1 "github.com/attestantio/go-builder-client/api/v1"
 	"github.com/attestantio/go-eth2-client/spec/phase0"
-	"github.com/pon-pbs/mev-plus/common"
+	"github.com/pon-network/mev-plus/common"
 	"github.com/restaking-cloud/native-delegation-for-plus/config"
 )
 
@@ -104,5 +104,3 @@ func getListOfBLSKeysFromSignedValidatorRegistration(payload []apiv1.SignedValid
 	}
 	return pubkeys, payloadMap
 }
-
-

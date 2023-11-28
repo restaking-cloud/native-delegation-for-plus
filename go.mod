@@ -6,7 +6,7 @@ require (
 	github.com/attestantio/go-builder-client v0.3.1
 	github.com/attestantio/go-eth2-client v0.18.3
 	github.com/ethereum/go-ethereum v1.13.4
-	github.com/pon-pbs/mev-plus v0.0.0-20231025144822-7ad199dea03c
+	github.com/pon-network/mev-plus v0.0.3
 	github.com/sirupsen/logrus v1.9.3
 	github.com/urfave/cli/v2 v2.25.7
 )
