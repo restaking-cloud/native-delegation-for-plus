@@ -1,0 +1,104 @@
+package ethservice
+
+import (
+	"context"
+	"fmt"
+	"net/url"
+	"strings"
+
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/ethclient"
+
+	"github.com/restaking-cloud/native-delegation-for-plus/ethservice/contracts"
+)
+
+func (e *EthService) connect(url *url.URL) error {
+	client, err := ethclient.Dial(url.String())
+	if err != nil {
+		return err
+	}
+	e.client = client
+	e.cfg.ExecutionNodeUrl = url
+
+	id, err := client.NetworkID(context.Background())
+	if err != nil {
+		return err
+	}
+	e.cfg.ChainID = id
+
+	synced, err := client.SyncProgress(context.Background())
+	if err != nil {
+		return err
+	}
+	if synced != nil && synced.CurrentBlock != synced.HighestBlock {
+		return fmt.Errorf("execution node not synced")
+	}
+
+	return nil
+}
+
+func (e *EthService) configureK2Contract(address common.Address) error {
+	e.cfg.K2ContractAddress = address
+
+	contractAbi, err := abi.JSON(strings.NewReader(contracts.K2_CONTRACT_ABI))
+	if err != nil {
+		return err
+	}
+	e.cfg.K2ContractABI = &contractAbi
+
+	// check if the contract is deployed
+	contractByteCode, err := e.client.CodeAt(context.Background(), address, nil)
+	if err != nil {
+		return err
+	}
+
+	if len(contractByteCode) == 0 {
+		return fmt.Errorf("k2 contract not deployed")
+	}
+
+	return nil
+}
+
+func (e *EthService) configureProposerRegistryContract(address common.Address) error {
+	e.cfg.ProposerRegistryContractAddress = address
+
+	contractAbi, err := abi.JSON(strings.NewReader(contracts.PROPOSER_REGISTRY_CONTRACT_ABI))
+	if err != nil {
+		return err
+	}
+	e.cfg.ProposerRegistryContractABI = &contractAbi
+
+	contractByteCode, err := e.client.CodeAt(context.Background(), address, nil)
+	if err != nil {
+		return err
+	}
+
+	if len(contractByteCode) == 0 {
+		return fmt.Errorf("proposer registry contract not deployed")
+	}
+
+	return nil
+}
+
+func (e *EthService) configureMulticallContract(address common.Address) error {
+	e.cfg.MulticallContractAddress = address
+
+	contractAbi, err := abi.JSON(strings.NewReader(contracts.MULTICALL3_CONTRACT_ABI))
+	if err != nil {
+		return err
+	}
+	e.cfg.MulticallContractABI = &contractAbi
+
+	// check if the contract is deployed
+	contractByteCode, err := e.client.CodeAt(context.Background(), address, nil)
+	if err != nil {
+		return err
+	}
+
+	if len(contractByteCode) == 0 {
+		return fmt.Errorf("multicall contract not deployed")
+	}
+
+	return nil
+}
