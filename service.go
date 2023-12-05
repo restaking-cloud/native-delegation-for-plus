@@ -8,6 +8,7 @@ import (
 
 	"github.com/restaking-cloud/native-delegation-for-plus/ethservice"
 	ethConfig "github.com/restaking-cloud/native-delegation-for-plus/ethservice/config"
+	ethcommon "github.com/ethereum/go-ethereum/common"
 
 	"github.com/pon-network/mev-plus/common"
 	coreCommon "github.com/pon-network/mev-plus/core/common"
@@ -32,6 +33,10 @@ type K2Service struct {
 	beacon           *beacon.BeaconService
 	lock             sync.Mutex
 
+	exclusionList map[string]k2common.ExcludedValidator
+
+	exit chan struct{}
+
 	cfg config.K2Config
 }
 
@@ -42,6 +47,8 @@ func NewK2Service() *K2Service {
 		web3Signer:       web3signer.NewWeb3SignerService(),
 		eth1:             ethservice.NewEthService(),
 		beacon:           beacon.NewBeaconService(),
+		exclusionList:    make(map[string]k2common.ExcludedValidator),
+		exit:             make(chan struct{}),
 	}
 }
 
@@ -66,12 +73,30 @@ func (k2 *K2Service) Start() error {
 		return nil
 	}
 
-	k2.log.WithField("representativeAddress", k2.cfg.ValidatorWalletAddress).Info("Started K2 module")
+	// start monitoring the exclusion list file
+	if k2.cfg.ExclusionListFile != "" {
+		go k2.watchExclusionList(k2.cfg.ExclusionListFile)
+	}
+
+	registryEnabled := k2.cfg.ProposerRegistryContractAddress != ethcommon.Address{}
+	k2Enabled := k2.cfg.K2ContractAddress != ethcommon.Address{}
+
+	k2.log.WithFields(logrus.Fields{
+		"representativeAddress":          k2.cfg.ValidatorWalletAddress,
+		"registryEnabled":                 registryEnabled,
+		"k2Enabled":                       k2Enabled,
+	}).Info("Started K2 module")
 
 	return nil
 }
 
 func (k2 *K2Service) Stop() error {
+
+	// stop monitoring the exclusion list file
+	if k2.cfg.ExclusionListFile != "" {
+		close(k2.exit)
+	}
+
 	return nil
 }
 
@@ -117,6 +142,12 @@ func (k2 *K2Service) Configure(moduleFlags common.ModuleFlags) (err error) {
 	k2.cfg.ProposerRegistryContractAddress = knownConfig.ProposerRegistryContractAddress
 	k2.cfg.SignatureSwapperUrl = knownConfig.SignatureSwapperUrl
 
+	if k2.cfg.RegistrationOnly {
+		// module configured to only register validators and not delegate
+		k2.log.Debugf("Module configured to only register validators and not delegate")
+		k2.cfg.K2ContractAddress = ethcommon.Address{}
+	}
+
 	// connect to the execution node and get the chain id, and contracts configured
 	err = k2.eth1.Configure(ethConfig.EthServiceConfig{
 		ExecutionNodeUrl:                k2.cfg.ExecutionNodeUrl,
@@ -153,6 +184,11 @@ func (k2 *K2Service) Configure(moduleFlags common.ModuleFlags) (err error) {
 	if sigSwapperChainId != chainId {
 		// wrong chain id configured for the signature swapper, needs to match the beacon node (validator truth source)
 		return fmt.Errorf("chain id mismatch: beacon node reports %v, signature swapper reports %v", chainId, sigSwapperChainId)
+	}
+
+	if k2.cfg.MaxGasPrice > 0 {
+		// Then the user has set a max gas price, set it on the eth1 service
+		k2.eth1.SetMaxGasPrice(k2.cfg.MaxGasPrice)
 	}
 
 	return nil

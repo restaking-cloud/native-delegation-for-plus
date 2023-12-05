@@ -25,5 +25,8 @@ func k2Flags() []cli.Flag {
 		PayoutRecipientFlag,
 		BeaconNodeUrlFlag,
 		ExecutionNodeUrlFlag,
+		ExclusionListFlag,
+		MaxGasPriceFlag,
+		RegistrationOnlyFlag,
 	}
 }

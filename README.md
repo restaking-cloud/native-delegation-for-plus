@@ -41,9 +41,43 @@ NOTE: This key is the only wallet key that would be granted permission to manage
 
 ### Optional Flags
 
+- `k2.registration-only`: This flag is used to register validators on-chain in the Proposer Registry without natively delegating them to the K2 contract pool.
+
 - `k2.web3-signer-url`: The module supports the use of a [Web3Signer](https://docs.web3signer.consensys.net/) to sign custom registration messages with a modified payout recipient address from the one configured on the node. This flag is optional and can be used to configure the Web3Signer URL. The validator keys to which their registration messages wish to be signed should be configured on the Web3Signer.
 
 - `k2.payout-recipient`: The address of an alternative globally configured payout recipient. This address will be used for all validators if specified. If not specified, the payout recipient address configured on the node for each validator key will be used. To use this flag, the `k2.web3-signer-url` flag must also be specified in order to sign the registration messages with the alternative payout recipient address.
+
+- `k2.max-gas-price`: The maximum gas price to be used for on-chain transactions. This flag is optional and defaults to 10 Gwei if not specified. If in any registration, the gas price exceeds the maximum gas price, the registration/delegation will be skipped for that epoch.
+
+- `k2.exclusion-list`: This flag is used to specify a list of validator public keys to exclude from either on-chain registration or native delegation. The flag accepts a filepath to a JSON file containing the list of validator public keys to exclude. The file is continuously monitored by the software and would pick up any changes immediately, allowing you to manage your registrations without restarting MEV Plus. The JSON file should be in the following format:
+
+```json
+[
+    {
+        "publicKey": string,
+        "excludedFromProposerRegistration": bool,
+        "excludedFromNativeDelegation": bool
+    }
+]
+```
+
+eg. `k2.exclusion-list ./exclusion-list.json`
+```json exclusion-list.json
+[
+  {
+    "publicKey": "0x93e2de67f75817c101c637b16efc4ba1de8374ed563a4cdcf2d6cc5ea6c1de4ab5abcefdb3bd2baa96a1a2ddb1847d08",
+    "excludedFromProposerRegistration": false,
+    "excludedFromNativeDelegation": true
+  },
+  {
+    "publicKey": "0x83eef01c1dafda9ca1d4ec1e4d92ca8dac4131b7289c4b11e7024752ea66a5180462661b8b4a862b3aca970422377eb3",
+    "excludedFromProposerRegistration": true,
+    "excludedFromNativeDelegation": true
+  },
+]
+```
+**NOTE**: The `excludedFromProposerRegistration` and `excludedFromNativeDelegation` fields are optional and default to `false` if not specified, either or both can be specified.
+If `excludedFromProposerRegistration` is set to `true`, the validator will not be registered on-chain in the Proposer Registry. And if this validator is intended to be natively delegated, and is not already in the Proposer Registry, the registration will fail, as native delegation requires registration in the Proposer Registry.
 
 
 ## How It Works

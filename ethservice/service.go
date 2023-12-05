@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/sirupsen/logrus"
 
 	k2common "github.com/restaking-cloud/native-delegation-for-plus/common"
 
@@ -81,6 +82,29 @@ func (e *EthService) ConnectedChainId() *big.Int {
 
 func (e *EthService) Status() (*ethereum.SyncProgress, error) {
 	return e.client.SyncProgress(context.Background())
+}
+
+func (e *EthService) SetMaxGasPrice(maxGasPrice uint64) {
+
+	e.cfg.MaxGasPrice = big.NewInt(int64(maxGasPrice))
+
+	logger := logrus.WithField("moduleExecution", "k2").WithField("maxGasPrice", e.cfg.MaxGasPrice.String())
+	currentGasPrice, err := e.client.SuggestGasPrice(context.Background())
+	if err != nil {
+		logger.WithError(err).Debug("Failed to retrieve current gas price")
+	} else {
+		// check if max gas price is more than 30% lower than current gas price
+		diff := new(big.Float).Sub(new(big.Float).SetInt(e.cfg.MaxGasPrice), new(big.Float).SetInt(currentGasPrice))
+		percentage := new(big.Float).Quo(diff, new(big.Float).SetInt(currentGasPrice))
+		if percentage.Cmp(big.NewFloat(-0.3)) < 0 {
+			logger.WithFields(
+				logrus.Fields{
+					"currentGasPrice": currentGasPrice.String()+" gwei",
+					"maxGasPrice":     e.cfg.MaxGasPrice.String()+" gwei",
+				},
+			).Warn("Max gas price is more than 30% lower than current gas price, consider increasing it, else registrations might be paused for a long time")
+		}
+	}
 }
 
 func (e *EthService) FetchProposerRegistryAddressFromK2() (string, error) {

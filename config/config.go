@@ -8,25 +8,31 @@ import (
 )
 
 type K2Config struct {
-	ValidatorWalletPrivateKey *ecdsa.PrivateKey
-	ValidatorWalletAddress    common.Address
-	Web3SignerUrl             *url.URL
-	SignatureSwapperUrl       *url.URL
-	BeaconNodeUrl 		   *url.URL
-	ExecutionNodeUrl 	   *url.URL
-	K2ContractAddress         common.Address
+	ValidatorWalletPrivateKey       *ecdsa.PrivateKey
+	ValidatorWalletAddress          common.Address
+	Web3SignerUrl                   *url.URL
+	SignatureSwapperUrl             *url.URL
+	BeaconNodeUrl                   *url.URL
+	ExecutionNodeUrl                *url.URL
+	K2ContractAddress               common.Address
 	ProposerRegistryContractAddress common.Address
-	PayoutRecipient common.Address // to override the payout recipient for all validators
+	PayoutRecipient                 common.Address // to override the payout recipient for all validators
+	ExclusionListFile               string         // to exclude validators from registration or native delegation
+	MaxGasPrice                     uint64
+	RegistrationOnly                bool
 }
 
 var K2ConfigDefaults = K2Config{
-	ValidatorWalletPrivateKey: nil,
-	ValidatorWalletAddress:    common.Address{},
-	Web3SignerUrl:             nil,
-	SignatureSwapperUrl:       nil,
-	BeaconNodeUrl:             nil,
-	ExecutionNodeUrl:          nil,
-	K2ContractAddress:         common.Address{},
+	ValidatorWalletPrivateKey:       nil,
+	ValidatorWalletAddress:          common.Address{},
+	Web3SignerUrl:                   nil,
+	SignatureSwapperUrl:             nil,
+	BeaconNodeUrl:                   nil,
+	ExecutionNodeUrl:                nil,
+	K2ContractAddress:               common.Address{},
 	ProposerRegistryContractAddress: common.Address{},
-	PayoutRecipient: common.Address{},
+	PayoutRecipient:                 common.Address{},
+	ExclusionListFile:               "",
+	MaxGasPrice:                     0,
+	RegistrationOnly:                false,
 }

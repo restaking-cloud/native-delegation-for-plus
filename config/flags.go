@@ -33,4 +33,20 @@ var (
 		Usage:    "The url of the execution node",
 		Category: strings.ReplaceAll(strings.ToUpper(ModuleName), "_", " "),
 	}
+	ExclusionListFlag = &cli.StringFlag{
+		Name:     ModuleName + "." + "exclusion-list",
+		Usage:    "The list of addresses to exclude from either the Proposer Registration or Native Delegation",
+		Category: strings.ReplaceAll(strings.ToUpper(ModuleName), "_", " "),
+	}
+	MaxGasPriceFlag = &cli.Uint64Flag{
+		Name:     ModuleName + "." + "max-gas-price",
+		Usage:    "The maximum gas price to use for transactions, in Gwei",
+		Category: strings.ReplaceAll(strings.ToUpper(ModuleName), "_", " "),
+		Value:    10,
+	}
+	RegistrationOnlyFlag = &cli.BoolFlag{
+		Name:     ModuleName + "." + "registration-only",
+		Usage:    "Only register the validators in the proposer registry, do not natively delegate",
+		Category: strings.ReplaceAll(strings.ToUpper(ModuleName), "_", " "),
+	}
 )

@@ -12,6 +12,9 @@ import (
 type EthServiceConfig struct {
 	ExecutionNodeUrl *url.URL
 	ChainID *big.Int
+
+	MaxGasPrice *big.Int
+
 	K2ContractAddress               common.Address
 	ProposerRegistryContractAddress common.Address
 
