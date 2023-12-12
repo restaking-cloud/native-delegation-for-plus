@@ -27,15 +27,12 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 
 	for validator, registered := range proposerRegistryResults {
 		if registered.Status == 0 {
-			k2.lock.Lock()
 			if excludedValidator, ok := k2.exclusionList[validator]; ok {
 				if excludedValidator.ExcludedFromProposerRegistration {
 					k2.log.WithField("validatorPubKey", validator).Debug("validator is excluded from Proposer Registry registration")
-					k2.lock.Unlock()
 					continue
 				}
 			}
-			k2.lock.Unlock()
 			registrationsToProcess[validator] = payloadMap[validator]
 		} else {
 			alreadyRegisteredMap[validator] = k2common.K2ValidatorRegistration{
@@ -82,7 +79,6 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 					// check to see if this is being handled by the registrationToProcess
 					if _, ok := registrationsToProcess[validator]; !ok {
 						// this should never happen unless the validator key has been excluded from the Proposer Registry registration
-						k2.lock.Lock()
 						if excludedValidator, ok := k2.exclusionList[validator]; ok {
 							if !excludedValidator.ExcludedFromProposerRegistration {
 								k2.log.WithField("validatorPubKey", validator).Errorf("validator is not registered in the Proposer Registry and is not being handled by the registrationToProcess")
@@ -90,22 +86,18 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 						} else {
 							k2.log.WithField("validatorPubKey", validator).Errorf("validator is not registered in the Proposer Registry and is not being handled by the registrationToProcess")
 						}
-						k2.lock.Unlock()
 					}
 					continue
 				} else {
 					// this is a validator that is already registered in the Proposer Registry, but not in the K2 contract
 
 					// check if the validator is excluded from native delegation
-					k2.lock.Lock()
 					if excludedValidator, ok := k2.exclusionList[validator]; ok {
 						if excludedValidator.ExcludedFromNativeDelegation {
 							k2.log.WithField("validatorPubKey", validator).Debug("validator is excluded from native delegation")
-							k2.lock.Unlock()
 							continue
 						}
 					}
-					k2.lock.Unlock()
 
 					// check if the representative address is the same as the one configured
 					if registration.RepresentativeAddress != k2.cfg.ValidatorWalletAddress {
@@ -171,7 +163,9 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 			// send the registration to the Proposer Registry
 			// and send the registration to the K2 contract
 			proposerRegistrations = append(proposerRegistrations, registration)
-			k2Registrations = append(k2Registrations, registration)
+			if k2.cfg.K2ContractAddress != (common.Address{}) {
+				k2Registrations = append(k2Registrations, registration)
+			}
 		}
 	}
 
