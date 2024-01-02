@@ -38,14 +38,36 @@ func (e *EthService) connect(url *url.URL) error {
 	return nil
 }
 
-func (e *EthService) configureK2Contract(address common.Address) error {
-	e.cfg.K2ContractAddress = address
+func (e *EthService) configureK2LendingContract(address common.Address) error {
+	e.cfg.K2LendingContractAddress = address
 
-	contractAbi, err := abi.JSON(strings.NewReader(contracts.K2_CONTRACT_ABI))
+	contractAbi, err := abi.JSON(strings.NewReader(contracts.K2_LENDING_CONTRACT_ABI))
 	if err != nil {
 		return err
 	}
-	e.cfg.K2ContractABI = &contractAbi
+	e.cfg.K2LendingContractABI = &contractAbi
+
+	// check if the contract is deployed
+	contractByteCode, err := e.client.CodeAt(context.Background(), address, nil)
+	if err != nil {
+		return err
+	}
+
+	if len(contractByteCode) == 0 {
+		return fmt.Errorf("k2 contract not deployed")
+	}
+
+	return nil
+}
+
+func (e *EthService) configureK2NodeOperatorContract(address common.Address) error {
+	e.cfg.K2NodeOperatorContractAddress = address
+
+	contractAbi, err := abi.JSON(strings.NewReader(contracts.K2_NODE_OPERATOR_CONTRACT_ABI))
+	if err != nil {
+		return err
+	}
+	e.cfg.K2NodeOperatorContractABI = &contractAbi
 
 	// check if the contract is deployed
 	contractByteCode, err := e.client.CodeAt(context.Background(), address, nil)

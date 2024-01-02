@@ -2,13 +2,15 @@ package k2
 
 import (
 	"fmt"
+	"net/http"
 	"sync"
 
+	balanceverifier "github.com/restaking-cloud/native-delegation-for-plus/balanceverifier"
 	"github.com/restaking-cloud/native-delegation-for-plus/config"
 
+	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/restaking-cloud/native-delegation-for-plus/ethservice"
 	ethConfig "github.com/restaking-cloud/native-delegation-for-plus/ethservice/config"
-	ethcommon "github.com/ethereum/go-ethereum/common"
 
 	"github.com/pon-network/mev-plus/common"
 	coreCommon "github.com/pon-network/mev-plus/core/common"
@@ -31,7 +33,10 @@ type K2Service struct {
 	web3Signer       *web3signer.Web3SignerService
 	eth1             *ethservice.EthService
 	beacon           *beacon.BeaconService
+	balanceverifier  *balanceverifier.BalanceVerifierService
 	lock             sync.Mutex
+
+	server *http.Server
 
 	exclusionList map[string]k2common.ExcludedValidator
 
@@ -47,8 +52,10 @@ func NewK2Service() *K2Service {
 		web3Signer:       web3signer.NewWeb3SignerService(),
 		eth1:             ethservice.NewEthService(),
 		beacon:           beacon.NewBeaconService(),
+		balanceverifier:  balanceverifier.NewBalanceVerifierService(),
 		exclusionList:    make(map[string]k2common.ExcludedValidator),
 		exit:             make(chan struct{}),
+		cfg:              config.K2ConfigDefaults,
 	}
 }
 
@@ -79,12 +86,24 @@ func (k2 *K2Service) Start() error {
 	}
 
 	registryEnabled := k2.cfg.ProposerRegistryContractAddress != ethcommon.Address{}
-	k2Enabled := k2.cfg.K2ContractAddress != ethcommon.Address{}
+	k2Enabled := (k2.cfg.K2LendingContractAddress != ethcommon.Address{}) && (k2.cfg.K2NodeOperatorContractAddress != ethcommon.Address{})
+
+	if k2.server != nil {
+		return fmt.Errorf("K2 server already running")
+	}
+
+	// start the server
+	k2.server = &http.Server{
+		Addr:    k2.cfg.ListenAddress.Host,
+		Handler: k2.getRouter(),
+	}
+
+	go k2.startServer()
 
 	k2.log.WithFields(logrus.Fields{
-		"representativeAddress":          k2.cfg.ValidatorWalletAddress,
-		"registryEnabled":                 registryEnabled,
-		"k2Enabled":                       k2Enabled,
+		"representativeAddress": k2.cfg.ValidatorWalletAddress,
+		"registryEnabled":       registryEnabled,
+		"k2Enabled":             k2Enabled,
 	}).Info("Started K2 module")
 
 	return nil
@@ -96,6 +115,14 @@ func (k2 *K2Service) Stop() error {
 	if k2.cfg.ExclusionListFile != "" {
 		close(k2.exit)
 	}
+
+	// stop the server
+	err := k2.stopServer()
+	if err != nil {
+		return err
+	}
+
+	k2.log.Info("Stopped K2 module")
 
 	return nil
 }
@@ -138,20 +165,24 @@ func (k2 *K2Service) Configure(moduleFlags common.ModuleFlags) (err error) {
 		return fmt.Errorf("chain id %v is not supported", chainId)
 	}
 	// beacon node chain id is supported, set the rest of the config
-	k2.cfg.K2ContractAddress = knownConfig.K2ContractAddress
+	k2.cfg.K2LendingContractAddress = knownConfig.K2LendingContractAddress
+	k2.cfg.K2NodeOperatorContractAddress = knownConfig.K2NodeOperatorContractAddress
 	k2.cfg.ProposerRegistryContractAddress = knownConfig.ProposerRegistryContractAddress
 	k2.cfg.SignatureSwapperUrl = knownConfig.SignatureSwapperUrl
+	k2.cfg.BalanceVerificationUrl = knownConfig.BalanceVerificationUrl
 
 	if k2.cfg.RegistrationOnly {
 		// module configured to only register validators and not delegate
 		k2.log.Debugf("Module configured to only register validators and not delegate")
-		k2.cfg.K2ContractAddress = ethcommon.Address{}
+		k2.cfg.K2LendingContractAddress = ethcommon.Address{}
+		k2.cfg.K2NodeOperatorContractAddress = ethcommon.Address{}
 	}
 
 	// connect to the execution node and get the chain id, and contracts configured
 	err = k2.eth1.Configure(ethConfig.EthServiceConfig{
 		ExecutionNodeUrl:                k2.cfg.ExecutionNodeUrl,
-		K2ContractAddress:               k2.cfg.K2ContractAddress,
+		K2LendingContractAddress:        k2.cfg.K2LendingContractAddress,
+		K2NodeOperatorContractAddress:   k2.cfg.K2NodeOperatorContractAddress,
 		ProposerRegistryContractAddress: k2.cfg.ProposerRegistryContractAddress,
 		ValidatorWalletPrivateKey:       k2.cfg.ValidatorWalletPrivateKey,
 		ValidatorWalletAddress:          k2.cfg.ValidatorWalletAddress,
@@ -178,12 +209,26 @@ func (k2 *K2Service) Configure(moduleFlags common.ModuleFlags) (err error) {
 	if err != nil {
 		return err
 	}
-
 	// Ensure that the chain id reported by the beacon node matches the chain id reported by the signature swapper
 	sigSwapperChainId := k2.signatureSwapper.ConnectedChainId().Uint64()
 	if sigSwapperChainId != chainId {
 		// wrong chain id configured for the signature swapper, needs to match the beacon node (validator truth source)
 		return fmt.Errorf("chain id mismatch: beacon node reports %v, signature swapper reports %v", chainId, sigSwapperChainId)
+	}
+
+	// If configured for K2 operations
+	if (k2.cfg.K2LendingContractAddress != ethcommon.Address{}) && (k2.cfg.K2NodeOperatorContractAddress != ethcommon.Address{}) {
+		err = k2.balanceverifier.Configure(k2.cfg.BalanceVerificationUrl)
+		if err != nil {
+			return err
+		}
+
+		// Ensure that the chain id reported by the beacon node matches the chain id reported by the effective balance verifier
+		balanceVerifierChainId := k2.balanceverifier.ConnectedChainId().Uint64()
+		if balanceVerifierChainId != chainId {
+			// wrong chain id configured for the effective balance verification service, needs to match the beacon node (validator truth source)
+			return fmt.Errorf("chain id mismatch: beacon node reports %v, balance verifier reports %v", chainId, balanceVerifierChainId)
+		}
 	}
 
 	if k2.cfg.MaxGasPrice > 0 {

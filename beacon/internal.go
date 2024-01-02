@@ -7,6 +7,8 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+
+	"github.com/attestantio/go-eth2-client/spec/phase0"
 )
 
 func (b *BeaconService) connect(url *url.URL) error {
@@ -101,4 +103,57 @@ func (b *BeaconService) syncProgress(ctx context.Context) (res *SyncStatusData, 
 	}
 
 	return response.Data, nil
+}
+
+func (b *BeaconService) getValidatorsFinalizedInfo(ctx context.Context, blsKeys []phase0.BLSPubKey) (res []*ValidatorData, err error) {
+
+	queryKeys := ""
+	for i, blsKey := range blsKeys {
+		if i == 0 {
+			queryKeys += "?id=" + blsKey.String()
+		} else {
+			queryKeys += "&id=" + blsKey.String()
+		}
+	}
+
+	url := b.cfg.BeaconNodeUrl.String() + FinalizedValidatorsPath + queryKeys
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return res, err
+	}
+
+	resp, err := b.client.Do(req)
+	if err != nil {
+		return res, err
+	}
+
+	if resp.StatusCode == 414 {
+		// list of keys too long so split batch
+		mid := len(blsKeys) / 2
+		res1, err := b.getValidatorsFinalizedInfo(ctx, blsKeys[:mid])
+		if err != nil {
+			return res, err
+		}
+
+		res2, err := b.getValidatorsFinalizedInfo(ctx, blsKeys[mid:])
+		if err != nil {
+			return res, err
+		}
+
+		res = append(res, res1...)
+		res = append(res, res2...)
+	}
+
+	if resp.StatusCode != 200 {
+		return res, fmt.Errorf("invalid response (%d): %v", resp.StatusCode, resp)
+	}
+
+	var response GetValidatorsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return res, err
+	}
+
+	res = append(res, response.Data...)
+
+	return res, nil
 }

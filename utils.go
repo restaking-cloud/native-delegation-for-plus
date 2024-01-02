@@ -74,6 +74,20 @@ func (k2 *K2Service) parseConfig(moduleFlags common.ModuleFlags) (err error) {
 			if err != nil {
 				return fmt.Errorf("-%s: invalid registration only flag %q", config.RegistrationOnlyFlag.Name, flagValue)
 			}
+		case config.ListenAddressFlag.Name:
+			k2.cfg.ListenAddress, err = k2common.CreateUrl(flagValue)
+			if err != nil {
+				return fmt.Errorf("-%s: invalid url %q", config.ListenAddressFlag.Name, flagValue)
+			}
+		case config.ClaimThresholdFlag.Name:
+			k2.cfg.ClaimThreshold, err = strconv.ParseFloat(flagValue, 64)
+			if err != nil {
+				return fmt.Errorf("-%s: invalid claim threshold KETH amount %q", config.ClaimThresholdFlag.Name, flagValue)
+			}
+			// ensure the claim threshold is positive
+			if k2.cfg.ClaimThreshold < 0 {
+				return fmt.Errorf("-%s: claim threshold KETH amount must be positive", config.ClaimThresholdFlag.Name)
+			}
 		default:
 			return fmt.Errorf("unknown flag %q", flagName)
 		}

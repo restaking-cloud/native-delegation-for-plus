@@ -2,29 +2,31 @@ package config
 
 import (
 	"crypto/ecdsa"
-	"net/url"
 	"math/big"
+	"net/url"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
 )
 
 type EthServiceConfig struct {
 	ExecutionNodeUrl *url.URL
-	ChainID *big.Int
+	ChainID          *big.Int
 
 	MaxGasPrice *big.Int
 
-	K2ContractAddress               common.Address
+	K2LendingContractAddress        common.Address
+	K2NodeOperatorContractAddress   common.Address
 	ProposerRegistryContractAddress common.Address
 
 	// ABI
-	K2ContractABI *abi.ABI
+	K2LendingContractABI        *abi.ABI
+	K2NodeOperatorContractABI        *abi.ABI
 	ProposerRegistryContractABI *abi.ABI
 
 	// Multicall
 	MulticallContractAddress common.Address
-	MulticallContractABI *abi.ABI
+	MulticallContractABI     *abi.ABI
 
 	ValidatorWalletPrivateKey *ecdsa.PrivateKey
 	ValidatorWalletAddress    common.Address

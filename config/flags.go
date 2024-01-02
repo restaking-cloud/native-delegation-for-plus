@@ -49,4 +49,14 @@ var (
 		Usage:    "Only register the validators in the proposer registry, do not natively delegate",
 		Category: strings.ReplaceAll(strings.ToUpper(ModuleName), "_", " "),
 	}
+	ListenAddressFlag = &cli.StringFlag{
+		Name:     ModuleName + "." + "listen-address",
+		Usage:    "The address to listen on for incoming requests",
+		Category: strings.ReplaceAll(strings.ToUpper(ModuleName), "_", " "),
+	}
+	ClaimThresholdFlag = &cli.Float64Flag{
+		Name:     ModuleName + "." + "claim-threshold",
+		Usage:    "The threshold for claiming rewards, in KETH",
+		Category: strings.ReplaceAll(strings.ToUpper(ModuleName), "_", " "),
+	}
 )

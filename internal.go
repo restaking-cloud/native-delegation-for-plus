@@ -1,8 +1,13 @@
 package k2
 
 import (
+	"fmt"
+	"math"
+	"math/big"
+
 	apiv1 "github.com/attestantio/go-builder-client/api/v1"
 	"github.com/attestantio/go-eth2-client/spec/bellatrix"
+	"github.com/attestantio/go-eth2-client/spec/phase0"
 	"github.com/ethereum/go-ethereum/common"
 	k2common "github.com/restaking-cloud/native-delegation-for-plus/common"
 	"github.com/sirupsen/logrus"
@@ -52,8 +57,8 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 	}
 	proposerRegistryAlreadyRegisteredCount := uint64(len(alreadyRegisteredMap))
 
-	// prepare registrations
-	registrations, err := k2.prepareRegistrations(registrationsToProcess)
+	// prepare registrations from the registrationsToProcess for the proposer registry
+	processValidators, err := k2.prepareRegistrations(registrationsToProcess)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +66,7 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 	var k2AlreadyRegisteredCount uint64
 	var k2UnsuppportedCount uint64
 
-	if k2.cfg.K2ContractAddress != (common.Address{}) {
+	if k2.cfg.K2LendingContractAddress != (common.Address{}) {
 		// If the module is configured for K2 operations in addition to Proposer Registry operations
 
 		k2.log.WithField("validators", len(validators)).Info("Checking K2 registrations")
@@ -70,6 +75,9 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 			k2.log.WithError(err).Error("failed to check if validators are already registered")
 			return nil, err
 		}
+
+		var k2OnlyRegistrationsToProcess []apiv1.SignedValidatorRegistration
+
 		// prepare K2 only registrations
 		for validator, registered := range k2RegistrationResults {
 			if registered == (common.Address{}.String()) {
@@ -82,7 +90,7 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 						if excludedValidator, ok := k2.exclusionList[validator]; ok {
 							if !excludedValidator.ExcludedFromProposerRegistration {
 								k2.log.WithField("validatorPubKey", validator).Errorf("validator is not registered in the Proposer Registry and is not being handled by the registrationToProcess")
-							} 
+							}
 						} else {
 							k2.log.WithField("validatorPubKey", validator).Errorf("validator is not registered in the Proposer Registry and is not being handled by the registrationToProcess")
 						}
@@ -90,8 +98,10 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 					continue
 				} else {
 					// this is a validator that is already registered in the Proposer Registry, but not in the K2 contract
+					// so it would NOT be in the registrations mapping from the proposerRegistry registrations to process
+					// perform further checks on this validator to add it to the registration mapping if it must be natively delegated
 
-					// check if the validator is excluded from native delegation
+					// check if the validator is excluded from native delegation, before adding it as a registration to process
 					if excludedValidator, ok := k2.exclusionList[validator]; ok {
 						if excludedValidator.ExcludedFromNativeDelegation {
 							k2.log.WithField("validatorPubKey", validator).Debug("validator is excluded from native delegation")
@@ -108,22 +118,39 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 						continue
 					}
 
-					// representative address is the same as the one configured so can take action on this validator
-					signature, err := k2.signatureSwapper.GenerateSignature(
-						*registration.SignedValidatorRegistration,
-						k2.cfg.ValidatorWalletAddress,
-					)
-					if err != nil {
-						k2.log.WithField("validatorPubKey", validator).WithError(err).Error("failed to generate signature")
+					// check if the the fee recipient from the node matches that from the contract for
+					// that validator's registration message else the signature will not be valid
+					if registration.SignedValidatorRegistration.Message.FeeRecipient.String() != payloadMap[validator].Message.FeeRecipient.String() {
+						// fee recipient has changed between the registration message and the contract
+						// so cannot take action on this validator, as the node's signature will not be valid
+						// having signed a payload that has a different fee recipient from what the contract has
+						k2.log.WithFields(logrus.Fields{
+							"validatorPubKey": validator,
+							"registryPayout":  registration.SignedValidatorRegistration.Message.FeeRecipient.String(),
+							"nodePayout":      payloadMap[validator].Message.FeeRecipient.String(),
+						}).Debugf("validator is already registered in the Proposer Registry, but the fee recipient has changed between the registration message and the contract")
+						k2UnsuppportedCount++
 						continue
 					}
-					registration.ECDSASignature = signature
 
-					registrations[registration.SignedValidatorRegistration.Message.Pubkey.String()] = registration
+					// representative address is the same as the one configured so can take action on this validator
+
+					// They are in the already registered map which has the proposer registry success set to true,
+					// has the signed validator registration payload with the fee recipient the payout recipient registered in the
+					// proposer registry contract, and the representative address already set.
+					// the only field not set is the ecdsa sig for this already registered validator that would be needed
+					// for further k2 native delegation
+					k2OnlyRegistrationsToProcess = append(k2OnlyRegistrationsToProcess, *registration.SignedValidatorRegistration)
+					// this would be used to generate the signatures for these validators as they wont have signatures in the processValidators mapping yet
+
+					// Add this validator to the processValidators mapping as it would be used for native delegtion
+					processValidators[registration.SignedValidatorRegistration.Message.Pubkey.String()] = registration
 				}
 
 			} else {
 				// this is a validator that is already registered in the K2 contract meaning it is already registered in the Proposer Registry as well
+				// just add to the already registered map with the K2Success flag set to true so that this can be skipped since exists
+				// this is just necessary to log and return the results
 				if _, ok := alreadyRegisteredMap[validator]; !ok {
 					alreadyRegisteredMap[validator] = k2common.K2ValidatorRegistration{
 						RepresentativeAddress:   common.HexToAddress(registered),
@@ -132,13 +159,14 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 						SignedValidatorRegistration: &apiv1.SignedValidatorRegistration{
 							Message: &apiv1.ValidatorRegistration{
 								Pubkey:       payloadMap[validator].Message.Pubkey,
-								GasLimit:     payloadMap[validator].Message.GasLimit,
+								GasLimit:     payloadMap[validator].Message.GasLimit, // ** this may have changed from the gas limit signed as of the previous time of registration
 								FeeRecipient: bellatrix.ExecutionAddress(common.HexToAddress(registered)),
-								Timestamp:    payloadMap[validator].Message.Timestamp,
+								Timestamp:    payloadMap[validator].Message.Timestamp, // ** this is the timestamp of the payload, but not the time stamp of the actual payload that was signed as of previous time of registration
 							},
 							Signature: payloadMap[validator].Signature,
 						},
 					}
+					// fields marked ** are not obtainable from the contracts as such would use the current payload fields in returning the result for logging/output
 				} else {
 					r := alreadyRegisteredMap[validator]
 					r.K2Success = true
@@ -148,23 +176,51 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 				k2AlreadyRegisteredCount++
 			}
 		}
+
+		// Generate the ECDSA Signatures for the validators who are to perform K2 Only native delegation as these would not have been generated by
+		// the previous Proposer Only Registration Preparations. If the validator is not in the alreadyREgistered mapping and is in the registrations to
+		// process then it would already have an ECDSA Signature from the signature swapper that it woul use for both registration and native delegation
+
+		// Generate the signatures for the K2-only native delegations that were just added to the mapping
+		ecdsaSignatures, err := k2.signatureSwapper.BatchGenerateSignature(k2OnlyRegistrationsToProcess, k2.cfg.ValidatorWalletAddress)
+		if err != nil {
+			k2.log.WithError(err).Error("failed to generate signatures from signature swapper for native delegation")
+			return nil, err
+		}
+
+		for validatorPubKey, ecdsaSig := range ecdsaSignatures {
+			r := processValidators[validatorPubKey.String()]
+			r.ECDSASignature = ecdsaSig
+			processValidators[validatorPubKey.String()] = r
+		}
+
 	}
 
 	var proposerRegistrations []k2common.K2ValidatorRegistration
 	var k2Registrations []k2common.K2ValidatorRegistration
 
-	for _, registration := range registrations {
-		if registration.ProposerRegistrySuccess {
+	for _, processingDetails := range processValidators {
+		if processingDetails.ProposerRegistrySuccess {
 			// already registered in the Proposer Registry
 			// send the registration to the K2 contract only
-			k2Registrations = append(k2Registrations, registration)
+			// no need to check if excluded as it wont be in the mapping here if excluded from k2-only native delegation
+			if k2.cfg.K2LendingContractAddress != (common.Address{}) {
+				k2Registrations = append(k2Registrations, processingDetails)
+			}
 		} else {
 			// not registered in the Proposer Registry
 			// send the registration to the Proposer Registry
 			// and send the registration to the K2 contract
-			proposerRegistrations = append(proposerRegistrations, registration)
-			if k2.cfg.K2ContractAddress != (common.Address{}) {
-				k2Registrations = append(k2Registrations, registration)
+			// need to check if excluded is it may be in the mapping for only proposer registry registration
+			proposerRegistrations = append(proposerRegistrations, processingDetails)
+			if k2.cfg.K2LendingContractAddress != (common.Address{}) {
+				if excludedValidator, ok := k2.exclusionList[processingDetails.SignedValidatorRegistration.Message.Pubkey.String()]; ok {
+					if !excludedValidator.ExcludedFromNativeDelegation {
+						k2Registrations = append(k2Registrations, processingDetails)
+					}
+				} else {
+					k2Registrations = append(k2Registrations, processingDetails)
+				}
 			}
 		}
 	}
@@ -183,17 +239,17 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 			"newRegistrations": len(proposerRegistrations),
 			"txHash":           tx.Hash().String(),
 		}).Info("Proposer Registry registration transaction completed")
-		// update the proposerRegister status here as no error was returned from execution
+		// update the proposerRegistrySuccess status here as no error was returned from execution
 		for _, registration := range proposerRegistrations {
-			r := registrations[registration.SignedValidatorRegistration.Message.Pubkey.String()]
+			r := processValidators[registration.SignedValidatorRegistration.Message.Pubkey.String()]
 			r.ProposerRegistrySuccess = true
-			registrations[registration.SignedValidatorRegistration.Message.Pubkey.String()] = r
+			processValidators[registration.SignedValidatorRegistration.Message.Pubkey.String()] = r
 		}
 	} else {
 		k2.log.WithField("alreadyRegistered", proposerRegistryAlreadyRegisteredCount).Info("No new validators to register in the Proposer Registry")
 	}
 
-	if len(k2Registrations) > 0 && k2.cfg.K2ContractAddress != (common.Address{}) {
+	if len(k2Registrations) > 0 && k2.cfg.K2LendingContractAddress != (common.Address{}) {
 		k2.log.WithFields(logrus.Fields{
 			"k2Registrations":   len(k2Registrations),
 			"alreadyRegistered": k2AlreadyRegisteredCount,
@@ -210,11 +266,11 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 		}).Info("K2 registration transaction completed")
 		// update the k2Register status here as no error was returned from execution
 		for _, registration := range k2Registrations {
-			r := registrations[registration.SignedValidatorRegistration.Message.Pubkey.String()]
+			r := processValidators[registration.SignedValidatorRegistration.Message.Pubkey.String()]
 			r.K2Success = true
-			registrations[registration.SignedValidatorRegistration.Message.Pubkey.String()] = r
+			processValidators[registration.SignedValidatorRegistration.Message.Pubkey.String()] = r
 		}
-	} else if k2.cfg.K2ContractAddress != (common.Address{}) {
+	} else if k2.cfg.K2LendingContractAddress != (common.Address{}) {
 		k2.log.WithFields(
 			logrus.Fields{
 				"alreadyRegistered": k2AlreadyRegisteredCount,
@@ -224,18 +280,269 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 	}
 
 	var results []k2common.K2ValidatorRegistration
-	for _, registration := range registrations {
+	for _, registration := range processValidators {
 		results = append(results, registration)
 	}
 
-	if len(registrations) > 0 {
+	if len(processValidators) > 0 {
 		k2.log.WithFields(
 			logrus.Fields{
-				"newRegistrations":             len(registrations),
+				"newRegistrations":                   len(processValidators),
 				"newRegistrationsInProposerRegistry": len(proposerRegistrations),
-				"newRegistrationsInK2":       len(k2Registrations),
+				"newRegistrationsInK2":               len(k2Registrations),
 			},
 		).Info("Validator registrations successfully processed")
+	}
+
+	return results, nil
+}
+
+func (k2 *K2Service) processClaim(blsKeys []phase0.BLSPubKey) ([]k2common.K2Claim, error) {
+	k2.lock.Lock()
+	defer k2.lock.Unlock()
+
+	if k2.cfg.K2LendingContractAddress == (common.Address{}) || k2.cfg.K2NodeOperatorContractAddress == (common.Address{}) {
+		// module not configured to run
+		return nil, fmt.Errorf("module not configured to run K2 contract operations")
+	} else if k2.cfg.BalanceVerificationUrl == nil {
+		// module not configured to run
+		return nil, fmt.Errorf("module not configured to run balance verification operations for claims")
+	}
+
+	k2.log.WithField("validators", len(blsKeys)).Info("Checking K2 claims")
+	claimable, err := k2.eth1.BatchK2CheckClaimableRewards(blsKeys)
+	if err != nil {
+		k2.log.WithError(err).Error("failed to check if validators have claimable rewards")
+		return nil, err
+	}
+
+	var claimmableValidators []phase0.BLSPubKey
+	var claimMap = make(map[string]k2common.K2Claim)
+	var claimsToProcess []k2common.K2Claim
+
+	var totalClaimed *big.Float = big.NewFloat(0)
+
+	for _, validator := range blsKeys {
+		if claimableAmount, ok := claimable[validator.String()]; ok {
+			if claimableAmount > uint64(k2.cfg.ClaimThreshold*math.Pow(10, float64(k2common.KETHDecimals))) {
+				claim := k2common.K2Claim{
+					ValidatorPubKey: validator,
+					ClaimAmount:     claimableAmount,
+				}
+				claimMap[validator.String()] = claim
+				claimmableValidators = append(claimmableValidators, validator)
+			} else {
+				k2.log.WithFields(logrus.Fields{
+					"validator":        validator.String(),
+					"claimableRewards": claimableAmount,
+				}).Debug("Validator rewards are insufficient to claim")
+			}
+		}
+	}
+
+	if len(claimmableValidators) > 0 {
+
+		// if there are claims then get the effective balance of these validators and
+		// report to the balance verifier for signatures for the claims
+		effectiveBalances, err := k2.beacon.FinalizedValidatorEffectiveBalance(claimmableValidators)
+		if err != nil {
+			k2.log.WithError(err).Error("failed to get effective balances for validators")
+			return nil, err
+		}
+
+		var qualifiedValidators map[phase0.BLSPubKey]uint64 = make(map[phase0.BLSPubKey]uint64)
+		for validator, effectiveBalance := range effectiveBalances {
+			claim := claimMap[validator.String()]
+			claim.EffectiveBalance = effectiveBalance
+			claimMap[validator.String()] = claim
+			// validators with effective balance less than 32 ETH in a claim attempt
+			// would be kicked from the protocol. Best to avoid the software automatically
+			// causing such to the user without the user's own direct action
+			if effectiveBalance == 32000000000 {
+				qualifiedValidators[validator] = effectiveBalance
+			} else {
+				k2.log.WithFields(logrus.Fields{
+					"validator":        validator.String(),
+					"effectiveBalance": effectiveBalance,
+					"claimableRewards": claimable[validator.String()],
+				}).Debugf("Validator has effective balance less than 32 ETH, not processing claim")
+			}
+		}
+
+		if len(qualifiedValidators) == 0 {
+			k2.log.WithField("validators", len(claimmableValidators)).Info("No validators with effective balance of 32 ETH")
+			return nil, nil
+		}
+
+		verifiedEffectiveBalances, err := k2.balanceverifier.ReportEffectiveBalance(qualifiedValidators)
+		if err != nil {
+			k2.log.WithError(err).Error("failed to get verified effective balances for validators")
+			return nil, err
+		}
+
+		for v := range qualifiedValidators {
+			if effectiveBalanceSig, ok := verifiedEffectiveBalances[v]; ok {
+				updatedClaim := claimMap[v.String()]
+				updatedClaim.ECDSASignature = effectiveBalanceSig
+				claimsToProcess = append(claimsToProcess, updatedClaim)
+				claimMap[v.String()] = updatedClaim
+				amountDecimal := big.NewFloat(0).Quo(big.NewFloat(float64(updatedClaim.ClaimAmount)), big.NewFloat(math.Pow(10, float64(k2common.KETHDecimals))))
+				totalClaimed.Add(totalClaimed, amountDecimal)
+			}
+		}
+
+		k2.log.WithFields(logrus.Fields{
+			"claims": len(claimsToProcess),
+			"amount": totalClaimed.String() + " KETH",
+		}).Infof("Processing %v claims through K2 module", len(claimMap))
+		tx, err := k2.eth1.BatchK2ClaimRewards(claimsToProcess)
+		if err != nil {
+			k2.log.WithError(err).Error("failed to claim rewards from the K2 contract")
+			return nil, err
+		}
+		k2.log.WithFields(logrus.Fields{
+			"claims": len(claimsToProcess),
+			"amount": totalClaimed.String() + " KETH",
+			"txHash": tx.Hash().String(),
+		}).Info("K2 claim transaction completed")
+		// update the claim status here as no error was returned from execution
+		for _, claim := range claimsToProcess {
+			c := claimMap[claim.ValidatorPubKey.String()]
+			c.ClaimSuccess = true
+			claimMap[claim.ValidatorPubKey.String()] = c
+		}
+	} else {
+		k2.log.WithField("claims", len(claimMap)).Info("No new claims to process")
+		return nil, nil
+	}
+
+	var results []k2common.K2Claim
+	for _, claim := range claimMap {
+		results = append(results, claim)
+	}
+
+	k2.log.WithFields(logrus.Fields{
+		"claimsRequested:":          len(blsKeys),
+		"qualifiedClaimsProcessed:": len(claimsToProcess),
+		"amount":                    totalClaimed.String() + " KETH",
+	}).Info("K2 claims successfully processed")
+
+	return results, nil
+}
+
+func (k2 *K2Service) processExit(blsKey phase0.BLSPubKey) (res k2common.K2Exit, err error) {
+	k2.lock.Lock()
+	defer k2.lock.Unlock()
+
+	if k2.cfg.K2LendingContractAddress == (common.Address{}) || k2.cfg.K2NodeOperatorContractAddress == (common.Address{}) {
+		// module not configured to run
+		return res, fmt.Errorf("module not configured to run K2 contract operations")
+	} else if k2.cfg.BalanceVerificationUrl == nil {
+		// module not configured to run
+		return res, fmt.Errorf("module not configured to run balance verification operations for exits")
+	}
+
+	k2.log.WithFields(logrus.Fields{
+		"configuredRepresentative": k2.cfg.ValidatorWalletAddress.String(),
+	}).Info("Checking Validator Representative Address")
+
+	k2RegistrationResults, err := k2.eth1.BatchK2CheckRegisteredValidators([]phase0.BLSPubKey{blsKey})
+	if err != nil {
+		k2.log.WithError(err).Error("failed to check if validator is already registered")
+		return res, fmt.Errorf("failed to check if validator is already registered")
+	}
+
+	representativeAddress, ok := k2RegistrationResults[blsKey.String()]
+	if !ok {
+		k2.log.WithField("validator", blsKey.String()).Error("validator is not registered in the K2 contract")
+		return res, fmt.Errorf("validator is not registered in the K2 contract")
+	}
+
+	if representativeAddress != k2.cfg.ValidatorWalletAddress.String() {
+		k2.log.WithFields(logrus.Fields{
+			"configuredRepresentative": k2.cfg.ValidatorWalletAddress.String(),
+			"validatorRepresentative":  representativeAddress,
+		}).Info("Validator Representative Address does not match configured representative address")
+		return res, fmt.Errorf("validator representative address does not match configured representative address")
+	}
+
+	res.ValidatorPubKey = blsKey
+
+	// if authorized then get the effective balance of this validator and
+	// report to the balance verifier for a signature for the exit (un-delegation)
+	effectiveBalances, err := k2.beacon.FinalizedValidatorEffectiveBalance([]phase0.BLSPubKey{blsKey})
+	if err != nil {
+		k2.log.WithError(err).Error("failed to get effective balance for validator")
+		return res, fmt.Errorf("failed to get effective balance for validator")
+	}
+
+	res.EffectiveBalance = effectiveBalances[blsKey]
+
+	var report = make(map[phase0.BLSPubKey]uint64)
+	report[blsKey] = effectiveBalances[blsKey]
+
+	verifiedEffectiveBalances, err := k2.balanceverifier.ReportEffectiveBalance(report)
+	if err != nil {
+		k2.log.WithError(err).Error("failed to get verified effective balance for validator")
+		return res, fmt.Errorf("failed to get verified effective balance for validator")
+	}
+
+	res.ECDSASignature = verifiedEffectiveBalances[blsKey]
+
+	k2.log.WithFields(logrus.Fields{
+		"validator": blsKey.String(),
+	}).Info("Exiting validator from K2 contract")
+
+	tx, err := k2.eth1.K2Exit(res)
+	if err != nil {
+		k2.log.WithError(err).Error("failed to exit the validator from the K2 contract")
+		return res, fmt.Errorf("failed to exit the validator from the K2 contract: %w", err)
+	}
+	k2.log.WithFields(logrus.Fields{
+		"validator": blsKey.String(),
+		"txHash":    tx.Hash().String(),
+	}).Info("K2 validator exit transaction completed")
+	// update the exit status here as no error was returned from execution
+	res.ExitSuccess = true
+
+	k2.log.WithFields(logrus.Fields{
+		"validator": blsKey.String(),
+	}).Info("K2 validator exit successfully processed")
+
+	return res, nil
+}
+
+func (k2 *K2Service) batchProcessClaims(blsKeys []phase0.BLSPubKey) ([]k2common.K2Claim, error) {
+
+	if k2.cfg.K2LendingContractAddress == (common.Address{}) {
+		// module not configured to run
+		return nil, fmt.Errorf("module not configured to run K2 contract operations")
+	} else if k2.cfg.BalanceVerificationUrl == nil {
+		// module not configured to run
+		return nil, fmt.Errorf("module not configured to run balance verification operations for claims")
+	}
+
+	// Split the payload into batches of 1000 for the sake of gas efficiency
+	var batches [][]phase0.BLSPubKey
+	for i := 0; i < len(blsKeys); i += 1000 {
+		end := i + 1000
+		if end > len(blsKeys) {
+			end = len(blsKeys)
+		}
+		batches = append(batches, blsKeys[i:end])
+	}
+
+	var results []k2common.K2Claim
+	for i, batch := range batches {
+		k2.log.WithFields(logrus.Fields{
+			"currentBatchClaims": len(batch),
+			"totalClaims":        len(blsKeys),
+		}).Infof("Processing %v claims through K2 module [batch %v/%v]", len(batch), i+1, len(batches))
+		batchResults, err := k2.processClaim(batch)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, batchResults...)
 	}
 
 	return results, nil
@@ -283,9 +590,17 @@ func (k2 *K2Service) prepareRegistrations(toProcess map[string]apiv1.SignedValid
 
 	var registrations map[string]k2common.K2ValidatorRegistration = make(map[string]k2common.K2ValidatorRegistration)
 
+	if len(toProcess) == 0 {
+		return registrations, nil
+	}
+
+	var signedRegistrations []apiv1.SignedValidatorRegistration
+
 	// prepare Proposer Registry registrations
 	for validator, registration := range toProcess {
 		var PayoutRecipient bellatrix.ExecutionAddress
+		var signedRegistration apiv1.SignedValidatorRegistration
+
 		if k2.cfg.PayoutRecipient != (common.Address{}) && common.HexToAddress(registration.Message.FeeRecipient.String()) != k2.cfg.PayoutRecipient {
 			// if a custom the payout recipient is configured, different from the payload
 			// check if the validator is in the signable keys list
@@ -294,16 +609,32 @@ func (k2 *K2Service) prepareRegistrations(toProcess map[string]apiv1.SignedValid
 				// validator is not in the signable list so cannot generate a new signature
 				// then maintain the original payout recipient
 				PayoutRecipient = registration.Message.FeeRecipient
+				k2.log.WithFields(logrus.Fields{
+					"validatorPubKey": validator,
+					"payoutRecipient": registration.Message.FeeRecipient.String(),
+				}).Debug("validator is not in the signable list so cannot generate a new signature")
+			} else {
+				// validator is in the signable list so can generate a new signature
+				// then use the custom payout recipient
+				PayoutRecipient = bellatrix.ExecutionAddress(k2.cfg.PayoutRecipient)
+				k2.log.WithFields(logrus.Fields{
+					"validatorPubKey": validator,
+					"payoutRecipient": k2.cfg.PayoutRecipient.String(),
+				}).Debug("validator is in the signable list so can generate a new signature")
 			}
-		} else {
+		} else { // if a custom the payout recipient is not configured or is the same as the payload
 			PayoutRecipient = registration.Message.FeeRecipient
 		}
 
-		var signedRegistration apiv1.SignedValidatorRegistration
-
-		if k2.cfg.Web3SignerUrl != nil && common.HexToAddress(registration.Message.FeeRecipient.String()) != k2.cfg.PayoutRecipient && k2.cfg.PayoutRecipient != (common.Address{}) {
+		if k2.cfg.Web3SignerUrl != nil &&
+			common.HexToAddress(registration.Message.FeeRecipient.String()) != k2.cfg.PayoutRecipient &&
+			k2.cfg.PayoutRecipient != (common.Address{}) &&
+			PayoutRecipient != registration.Message.FeeRecipient {
 			// if a custom the payout recipient is configured, different from the payload
 			// and a web3 signer is configured, sign the registration with the custom payout recipient
+
+			// this condition would only be hit if the signable key check passed and the payout recipint has been
+			// set different from the payload through the preceeding step
 			signedRegistration, err = k2.web3Signer.SignRegistration(
 				PayoutRecipient,
 				registration.Message.GasLimit,
@@ -320,21 +651,25 @@ func (k2 *K2Service) prepareRegistrations(toProcess map[string]apiv1.SignedValid
 			signedRegistration = registration
 		}
 
-		signature, err := k2.signatureSwapper.GenerateSignature(
-			signedRegistration,
-			k2.cfg.ValidatorWalletAddress,
-		)
-		if err != nil {
-			k2.log.WithField("validatorPubKey", validator).WithError(err).Error("failed to generate signature")
-			continue
-		}
-
+		// Create mapping of qualified registrations to proceed
 		registrations[signedRegistration.Message.Pubkey.String()] = k2common.K2ValidatorRegistration{
-			ECDSASignature:              signature,
 			RepresentativeAddress:       k2.cfg.ValidatorWalletAddress,
 			SignedValidatorRegistration: &signedRegistration,
 		}
+		signedRegistrations = append(signedRegistrations, signedRegistration)
 
+	}
+
+	// Generate signatures for the qualified registration messages
+	ecdsaSignatures, err := k2.signatureSwapper.BatchGenerateSignature(signedRegistrations, k2.cfg.ValidatorWalletAddress)
+	if err != nil {
+		k2.log.WithError(err).Error("failed to generate signatures from signature swapper for proposer registration")
+		return nil, err
+	}
+
+	for validatorPubKey, reg := range registrations {
+		reg.ECDSASignature = ecdsaSignatures[reg.SignedValidatorRegistration.Message.Pubkey]
+		registrations[validatorPubKey] = reg
 	}
 
 	return registrations, nil

@@ -7,6 +7,7 @@ require (
 	github.com/attestantio/go-eth2-client v0.18.3
 	github.com/ethereum/go-ethereum v1.13.4
 	github.com/fsnotify/fsnotify v1.6.0
+	github.com/gorilla/mux v1.8.0
 	github.com/pon-network/mev-plus v0.0.3
 	github.com/sirupsen/logrus v1.9.3
 	github.com/urfave/cli/v2 v2.25.7

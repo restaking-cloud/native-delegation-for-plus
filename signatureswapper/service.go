@@ -12,6 +12,7 @@ import (
 	"time"
 
 	apiv1 "github.com/attestantio/go-builder-client/api/v1"
+	"github.com/attestantio/go-eth2-client/spec/phase0"
 
 	"github.com/ethereum/go-ethereum/common"
 
@@ -30,6 +31,11 @@ func NewSignatureSwapperService() *SignatureSwapperService {
 }
 
 func (s *SignatureSwapperService) Configure(url *url.URL) error {
+
+	if url == nil {
+		return fmt.Errorf("signatureswapperservice: url not set, cannot configure service")
+	}
+
 	s.cfg.Url = url
 
 	info, err := s.GetInfo()
@@ -114,4 +120,65 @@ func (s *SignatureSwapperService) GenerateSignature(
 	}
 
 	return response.EcdsaSignature, nil
+}
+
+func (s *SignatureSwapperService) BatchGenerateSignature(
+	registration []apiv1.SignedValidatorRegistration,
+	representativeAddress common.Address,
+) (map[phase0.BLSPubKey]EcdsaSignature, error) {
+
+	payload := BatchSignatureSwapPayload{}
+
+	res := make(map[phase0.BLSPubKey]EcdsaSignature)
+
+	if len(registration) == 0 {
+		return res, nil
+	}
+
+	for _, reg := range registration {
+		payload.Signatures = append(payload.Signatures, SignatureSwapPayload{
+			Signature:             reg.Signature,
+			Message:               reg.Message,
+			RepresentativeAddress: representativeAddress,
+		})
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return res, err
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), "POST", s.cfg.Url.String()+BatchGenerateSignaturePath, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return res, err
+	}
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return res, err
+	}
+
+	if resp.StatusCode != 200 {
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return res, fmt.Errorf("error reading invalid response (%d) body: %v", resp.StatusCode, err)
+		}
+
+		return res, fmt.Errorf("invalid response (%d): %v", resp.StatusCode, string(body))
+	}
+
+	var response BatchSignatureSwapResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return res, err
+	}
+
+	// ensure the length of original data matches the length of signatures
+	if len(response.OriginalData) != len(response.EcdsaSignatures) {
+		return res, fmt.Errorf("invalid response: length of original data does not match the length of signatures")
+	}
+
+	for i, reg := range response.OriginalData {
+		res[reg.Message.Pubkey] = response.EcdsaSignatures[i]
+	}
+
+	return res, nil
 }

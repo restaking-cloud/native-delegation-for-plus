@@ -1,7 +1,6 @@
 package beacon
 
 import (
-	"context"
 	"math/big"
 	"net/http"
 	"time"
@@ -33,8 +32,4 @@ func (b *BeaconService) Configure(cfg config.BeaconConfig) error {
 
 func (b *BeaconService) ConnectedChainId() *big.Int {
 	return b.cfg.ChainID
-}
-
-func (b *BeaconService) Status() (res *SyncStatusData, err error) {
-	return b.syncProgress(context.Background())
 }

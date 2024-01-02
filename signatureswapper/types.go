@@ -9,18 +9,33 @@ import (
 type EcdsaSignature struct {
 	R string `json:"r"`
 	S string `json:"s"`
-	V uint64 `json:"v"`
+	V uint8 `json:"v"`
 }
 
 type SignatureSwapResponse struct {
-	OriginalData *apiv1.SignedValidatorRegistration `json:"originalData"`
-	EcdsaSignature EcdsaSignature `json:"ecdsaSignature"`
+	OriginalData   *apiv1.SignedValidatorRegistration `json:"originalData"`
+	EcdsaSignature EcdsaSignature                     `json:"ecdsaSignature"`
+}
+
+type BatchSignatureSwapResponse struct {
+	OriginalData    []OriginalDataForBatchResponse `json:"originalData"`
+	EcdsaSignatures []EcdsaSignature               `json:"ecdsaSignatures"`
+}
+
+type OriginalDataForBatchResponse struct {
+	Message               *apiv1.ValidatorRegistration `json:"message"`
+	RepresentativeAddress common.Address               `json:"representativeAddress"`
+	Signature             phase0.BLSSignature          `json:"signature"`
 }
 
 type Info struct {
 	ChainID                        uint64 `json:"CHAIN_ID,string"`
 	BlsDomain                      string `json:"BLS_DOMAIN"`
 	GasLimitProposerRegistryDomain uint64 `json:"GAS_LIMIT_PROPOSER_REGISTRY_DOMAIN,string"`
+}
+
+type BatchSignatureSwapPayload struct {
+	Signatures []SignatureSwapPayload `json:"signatures"`
 }
 
 type SignatureSwapPayload struct {

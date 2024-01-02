@@ -28,5 +28,7 @@ func k2Flags() []cli.Flag {
 		ExclusionListFlag,
 		MaxGasPriceFlag,
 		RegistrationOnlyFlag,
+		ListenAddressFlag,
+		ClaimThresholdFlag,
 	}
 }
