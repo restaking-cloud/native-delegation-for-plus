@@ -522,10 +522,10 @@ func (k2 *K2Service) batchProcessClaims(blsKeys []phase0.BLSPubKey) ([]k2common.
 		return nil, fmt.Errorf("module not configured to run balance verification operations for claims")
 	}
 
-	// Split the payload into batches of 1000 for the sake of gas efficiency
+	// Split the payload into batches of 90 for the sake of gas efficiency
 	var batches [][]phase0.BLSPubKey
-	for i := 0; i < len(blsKeys); i += 1000 {
-		end := i + 1000
+	for i := 0; i < len(blsKeys); i += 90 {
+		end := i + 90
 		if end > len(blsKeys) {
 			end = len(blsKeys)
 		}
@@ -549,10 +549,10 @@ func (k2 *K2Service) batchProcessClaims(blsKeys []phase0.BLSPubKey) ([]k2common.
 }
 
 func (k2 *K2Service) batchProcessValidatorRegistrations(payload []apiv1.SignedValidatorRegistration) ([]k2common.K2ValidatorRegistration, error) {
-	// Split the payload into batches of 1000 for the sake of gas efficiency
+	// Split the payload into batches of 90 for the sake of gas efficiency, contract calls and signature swapping
 	var batches [][]apiv1.SignedValidatorRegistration
-	for i := 0; i < len(payload); i += 1000 {
-		end := i + 1000
+	for i := 0; i < len(payload); i += 90 {
+		end := i + 90
 		if end > len(payload) {
 			end = len(payload)
 		}
