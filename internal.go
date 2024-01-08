@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"sync"
+	"sync/atomic"
 
 	apiv1 "github.com/attestantio/go-builder-client/api/v1"
 	"github.com/attestantio/go-eth2-client/spec/bellatrix"
@@ -16,6 +18,131 @@ import (
 func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidatorRegistration) ([]k2common.K2ValidatorRegistration, error) {
 	k2.lock.Lock()
 	defer k2.lock.Unlock()
+
+	var globalMaxNativeDelegation *big.Int = big.NewInt(0)
+	var individualMaxNativeDelegation *big.Int = big.NewInt(0)
+
+	var currentGlobalNativeDelegation *big.Int = big.NewInt(0)
+	var currentIndividualNativeDelegation *big.Int = big.NewInt(0)
+
+	var isInInclusionList bool
+
+	var capacityChecksComplete atomic.Bool
+	var capacityChecksError atomic.Value
+
+	// Start go routines to get the global and current individual native delegation
+	// if the currentGlobal is at the max then check the currentIndividual and maxIndividual
+	go func() {
+		if k2.cfg.K2LendingContractAddress != (common.Address{}) {
+			// If the module is configured for K2 operations in addition to Proposer Registry operations
+			// use a sync wait group to wait for the results of the global and individual native delegation checks
+			var wg sync.WaitGroup
+			wg.Add(2)
+
+			go func() {
+				defer wg.Done()
+				var err error
+				globalMaxNativeDelegation, err = k2.eth1.GlobalMaxNativeDelegation()
+				if err != nil {
+					k2.log.WithError(err).Error("failed to get global max native delegation")
+					capacityChecksError.Store(err)
+					return
+				}
+				k2.log.WithField("globalMaxNativeDelegation", globalMaxNativeDelegation.String()).Debug("global max native delegation")
+			}()
+
+			go func() {
+				defer wg.Done()
+				var err error
+				currentGlobalNativeDelegation, err = k2.eth1.GetTotalNativeDelegationCapacityConsumed()
+				if err != nil {
+					k2.log.WithError(err).Error("failed to get current global native delegation")
+					capacityChecksError.Store(err)
+					return
+				}
+				k2.log.WithField("currentGlobalNativeDelegation", currentGlobalNativeDelegation.String()).Debug("current global native delegation")
+			}()
+
+			wg.Wait()
+
+			if capacityChecksError.Load() != nil {
+				// error occurred while getting the global and current individual native delegation
+				// so cannot proceed with the registrations
+				k2.log.WithError(capacityChecksError.Load().(error)).Error("failed to get global and current individual native delegation")
+				return
+			}
+
+			if globalMaxNativeDelegation != nil && currentGlobalNativeDelegation != nil && globalMaxNativeDelegation.Cmp(currentGlobalNativeDelegation) <= 0 {
+				// global max native delegation has been reached
+				// so need to check individual max native delegation
+				k2.log.WithField("globalMaxNativeDelegation", globalMaxNativeDelegation.String()).Debug("global max native delegation has been reached")
+
+				isInInclusionList, err := k2.eth1.K2CheckInclusionList(k2.cfg.ValidatorWalletAddress)
+				if err != nil {
+					k2.log.WithError(err).Error("failed to check if validator is in inclusion list")
+					capacityChecksError.Store(err)
+					return
+				}
+
+				if !isInInclusionList {
+					// validator is not in the inclusion list
+					// so cannot natively delegate this validator
+					k2.log.WithField("validatorPubKey", k2.cfg.ValidatorWalletAddress.String()).Debug("validator is not in the inclusion list")
+					capacityChecksComplete.Store(true)
+					return
+				}
+
+				// use a sync wait group to wait for the results of the individual native delegation checks
+				var wg sync.WaitGroup
+				wg.Add(2)
+
+				go func() {
+					defer wg.Done()
+					var err error
+					individualMaxNativeDelegation, err = k2.eth1.IndividualMaxNativeDelegation()
+					if err != nil {
+						k2.log.WithError(err).Error("failed to get individual max native delegation")
+						capacityChecksError.Store(err)
+						return
+					}
+					k2.log.WithField("individualMaxNativeDelegation", individualMaxNativeDelegation.String()).Debug("individual max native delegation")
+				}()
+
+				go func() {
+					defer wg.Done()
+					var err error
+					currentIndividualNativeDelegation, err := k2.eth1.K2CheckInclusionListKeysCount(k2.cfg.ValidatorWalletAddress)
+					if err != nil {
+						k2.log.WithError(err).Error("failed to get current individual native delegation")
+						capacityChecksError.Store(err)
+						return
+					}
+					k2.log.WithField("currentIndividualNativeDelegation", currentIndividualNativeDelegation.String()).Debug("current individual native delegation")
+				}()
+
+				wg.Wait()
+
+				if capacityChecksError.Load() != nil {
+					// error occurred while getting the individual native delegation
+					// so cannot proceed with the registrations
+					k2.log.WithError(capacityChecksError.Load().(error)).Error("failed to get individual native delegation")
+					return
+				}
+
+				capacityChecksComplete.Store(true)
+			} else {
+				// global max native delegation has not been reached
+				// so no need to check individual max native delegation
+				k2.log.WithField("globalMaxNativeDelegation", globalMaxNativeDelegation.String()).Debug("global max native delegation has not been reached")
+				capacityChecksComplete.Store(true)
+			}
+		} else {
+			// If the module is configured for Proposer Registry operations only
+			// then no need to check the global max native delegation
+			capacityChecksComplete.Store(true)
+			k2.log.Debug("module is configured for Proposer Registry operations only, K2 capacity checks not required")
+		}
+	}()
 
 	validators, payloadMap := k2common.GetListOfBLSKeysFromSignedValidatorRegistration(payload)
 
@@ -74,6 +201,18 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 		if err != nil {
 			k2.log.WithError(err).Error("failed to check if validators are already registered")
 			return nil, err
+		}
+
+		if len(k2RegistrationResults) > 0 {
+			// Wait for the global and individual native delegation checks to complete or for there to be an error
+			for !capacityChecksComplete.Load() && capacityChecksError.Load() == nil {
+				k2.log.Debug("waiting for global and individual native delegation checks to complete")
+			}
+		}
+
+		// if there is an error in the capacity checks then return the error
+		if capacityChecksError.Load() != nil {
+			return nil, capacityChecksError.Load().(error)
 		}
 
 		var k2OnlyRegistrationsToProcess []apiv1.SignedValidatorRegistration
@@ -140,11 +279,42 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 					// proposer registry contract, and the representative address already set.
 					// the only field not set is the ecdsa sig for this already registered validator that would be needed
 					// for further k2 native delegation
+
+					// Check if there is capacity for this validator to be natively delegated
+					// if the global max native delegation has been reached then check the individual max native delegation
+					if globalMaxNativeDelegation != nil && currentGlobalNativeDelegation != nil && globalMaxNativeDelegation.Cmp(currentGlobalNativeDelegation) <= 0 {
+						// global max native delegation has been reached
+						// so need to check individual max native delegation
+						if isInInclusionList {
+							if individualMaxNativeDelegation != nil && currentIndividualNativeDelegation != nil && individualMaxNativeDelegation.Cmp(currentIndividualNativeDelegation) <= 0 {
+								// individual max native delegation has been reached
+								// so cannot natively delegate this validator
+								k2.log.WithFields(logrus.Fields{
+									"validatorPubKey":   validator,
+									"individualMax":     individualMaxNativeDelegation.String(),
+									"currentIndividual": currentIndividualNativeDelegation.String(),
+								}).Debugf("validator is already registered in the Proposer Registry, but the global and individual max native delegation has been reached")
+								k2UnsuppportedCount++
+								continue
+							}
+						} else {
+							// validator representative address is not in the inclusion list
+							// so cannot natively delegate this validator since the max has been reached
+							k2.log.WithField("validatorPubKey", validator).Debug("validator representative address is not in the inclusion list")
+							k2UnsuppportedCount++
+							continue
+						}
+					}
+
 					k2OnlyRegistrationsToProcess = append(k2OnlyRegistrationsToProcess, *registration.SignedValidatorRegistration)
 					// this would be used to generate the signatures for these validators as they wont have signatures in the processValidators mapping yet
 
 					// Add this validator to the processValidators mapping as it would be used for native delegtion
 					processValidators[registration.SignedValidatorRegistration.Message.Pubkey.String()] = registration
+
+					// increase the current global and individual native delegation
+					currentGlobalNativeDelegation.Add(currentGlobalNativeDelegation, big.NewInt(1))
+					currentIndividualNativeDelegation.Add(currentIndividualNativeDelegation, big.NewInt(1))
 				}
 
 			} else {

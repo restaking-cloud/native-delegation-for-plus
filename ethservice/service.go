@@ -200,7 +200,6 @@ func (e *EthService) BatchCheckRegisteredValidators(validators []phase0.BLSPubKe
 		successfulValidatorChecks[validator.String()] = registrationResult
 	}
 
-
 	for k, v := range successfulValidatorChecks {
 		results[k] = v
 	}
@@ -567,4 +566,130 @@ func (e *EthService) K2Exit(validatorExit k2common.K2Exit) (tx *types.Transactio
 	}
 
 	return executedTx, nil
+}
+
+// K2 Capacity, Limits & Node Operator Inclusion list
+func (e *EthService) K2CheckInclusionList(nodeOperatorRepresentative common.Address) (bool, error) {
+
+	data, err := e.cfg.K2NodeOperatorContractABI.Pack("isPartOfInclusionList", nodeOperatorRepresentative)
+	if err != nil {
+		return false, err
+	}
+
+	callResult, err := e.client.CallContract(context.Background(), ethereum.CallMsg{
+		From: e.cfg.ValidatorWalletAddress,
+		To:   &e.cfg.K2NodeOperatorContractAddress,
+		Data: data,
+	}, nil)
+	if err != nil {
+		return false, err
+	}
+
+	var callResultDecoded bool
+	err = e.cfg.K2NodeOperatorContractABI.UnpackIntoInterface(&callResultDecoded, "isPartOfInclusionList", callResult)
+	if err != nil {
+		return false, fmt.Errorf("error unpacking isPartOfInclusionList result: %w", err)
+	}
+
+	return callResultDecoded, nil
+}
+
+func (e *EthService) K2CheckInclusionListKeysCount(nodeOperatorRepresentative common.Address) (*big.Int, error) {
+
+	data, err := e.cfg.K2NodeOperatorContractABI.Pack("totalNumberOfRegisteredKeysForInclusionListMember", nodeOperatorRepresentative)
+	if err != nil {
+		return nil, err
+	}
+
+	callResult, err := e.client.CallContract(context.Background(), ethereum.CallMsg{
+		From: e.cfg.ValidatorWalletAddress,
+		To:   &e.cfg.K2NodeOperatorContractAddress,
+		Data: data,
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var callResultDecoded *big.Int
+	err = e.cfg.K2NodeOperatorContractABI.UnpackIntoInterface(&callResultDecoded, "totalNumberOfRegisteredKeysForInclusionListMember", callResult)
+	if err != nil {
+		return nil, fmt.Errorf("error unpacking totalNumberOfRegisteredKeysForInclusionListMember result: %w", err)
+	}
+
+	return callResultDecoded, nil
+}
+
+func (e *EthService) IndividualMaxNativeDelegation() (*big.Int, error) {
+
+	data, err := e.cfg.K2NodeOperatorContractABI.Pack("MAX_NATIVE_DELEGATION_PER_NODE_OPERATOR")
+	if err != nil {
+		return nil, err
+	}
+
+	callResult, err := e.client.CallContract(context.Background(), ethereum.CallMsg{
+		From: e.cfg.ValidatorWalletAddress,
+		To:   &e.cfg.K2NodeOperatorContractAddress,
+		Data: data,
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var callResultDecoded *big.Int
+	err = e.cfg.K2NodeOperatorContractABI.UnpackIntoInterface(&callResultDecoded, "MAX_NATIVE_DELEGATION_PER_NODE_OPERATOR", callResult)
+	if err != nil {
+		return nil, fmt.Errorf("error unpacking MAX_NATIVE_DELEGATION_PER_NODE_OPERATOR result: %w", err)
+	}
+
+	return callResultDecoded, nil
+}
+
+func (e *EthService) GetTotalNativeDelegationCapacityConsumed() (*big.Int, error) {
+
+	data, err := e.cfg.K2NodeOperatorContractABI.Pack("totalOpenNativeDelegationCapacityConsumed")
+	if err != nil {
+		return nil, err
+	}
+
+	callResult, err := e.client.CallContract(context.Background(), ethereum.CallMsg{
+		From: e.cfg.ValidatorWalletAddress,
+		To:   &e.cfg.K2NodeOperatorContractAddress,
+		Data: data,
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var callResultDecoded *big.Int
+	err = e.cfg.K2NodeOperatorContractABI.UnpackIntoInterface(&callResultDecoded, "totalOpenNativeDelegationCapacityConsumed", callResult)
+	if err != nil {
+		return nil, fmt.Errorf("error unpacking totalOpenNativeDelegationCapacityConsumed result: %w", err)
+	}
+
+	return callResultDecoded, nil
+}
+
+func (e *EthService) GlobalMaxNativeDelegation() (*big.Int, error) {
+
+	data, err := e.cfg.K2NodeOperatorContractABI.Pack("MAX_OPEN_NATIVE_DELEGATION_CAPACITY")
+	if err != nil {
+		return nil, err
+	}
+
+	callResult, err := e.client.CallContract(context.Background(), ethereum.CallMsg{
+		From: e.cfg.ValidatorWalletAddress,
+		To:   &e.cfg.K2NodeOperatorContractAddress,
+		Data: data,
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var callResultDecoded *big.Int
+	err = e.cfg.K2NodeOperatorContractABI.UnpackIntoInterface(&callResultDecoded, "MAX_OPEN_NATIVE_DELEGATION_CAPACITY", callResult)
+	if err != nil {
+		return nil, fmt.Errorf("error unpacking MAX_OPEN_NATIVE_DELEGATION_CAPACITY result: %w", err)
+	}
+
+	return callResultDecoded, nil
 }
