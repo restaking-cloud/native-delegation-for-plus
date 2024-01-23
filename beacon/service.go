@@ -4,6 +4,7 @@ import (
 	"math/big"
 	"net/http"
 	"time"
+	"sync"
 
 	"github.com/restaking-cloud/native-delegation-for-plus/beacon/config"
 )
@@ -11,6 +12,10 @@ import (
 type BeaconService struct {
 	cfg    config.BeaconConfig
 	client *http.Client
+
+	mu sync.Mutex
+
+	currentSlot uint64
 }
 
 func NewBeaconService() *BeaconService {

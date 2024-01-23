@@ -1,9 +1,11 @@
 package k2
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 
 	balanceverifier "github.com/restaking-cloud/native-delegation-for-plus/balanceverifier"
 	"github.com/restaking-cloud/native-delegation-for-plus/config"
@@ -39,6 +41,9 @@ type K2Service struct {
 	server *http.Server
 
 	exclusionList map[string]k2common.ExcludedValidator
+
+	// Track the last most recent timestamp that was processed
+	lastRegistrationMessageTimestamp time.Time
 
 	exit chan struct{}
 
@@ -100,6 +105,9 @@ func (k2 *K2Service) Start() error {
 
 	go k2.startServer()
 
+	// start monitoring
+	go k2.monitor()
+
 	k2.log.WithFields(logrus.Fields{
 		"representativeAddress": k2.cfg.ValidatorWalletAddress,
 		"registryEnabled":       registryEnabled,
@@ -107,6 +115,54 @@ func (k2 *K2Service) Start() error {
 	}).Info("Started K2 module")
 
 	return nil
+}
+
+func (k2 *K2Service) monitor() error {
+
+	ctx := context.Background()
+	ctxWithCancel, cancel := context.WithCancel(ctx)
+	var HeadChan chan beacon.HeadEventData = make(chan beacon.HeadEventData, 64)
+
+	// For utility in knowing the current slot
+	go k2.beacon.SubscribeToHeadEvents(ctxWithCancel, HeadChan)
+
+	// For each headslot event check whether the current timestamp and the last processed timestamp are more than 2 epochs apart
+	// if so then issue a warning in the logs that the module has received no registration events for more than 2 epochs
+	// need to check node and mevPlus are configured correctly for the builder api
+
+	var lastWarnedTimestamp time.Time
+
+	for {
+		select {
+		case <-k2.exit:
+			cancel()
+			return nil
+		case <-ctxWithCancel.Done():
+			return nil
+		case <-HeadChan:
+			currentTime := time.Now()
+			k2.lock.Lock()
+			if k2.lastRegistrationMessageTimestamp.IsZero() {
+				// no registration events received yet
+				if lastWarnedTimestamp.IsZero() {
+					lastWarnedTimestamp = currentTime
+				} else if currentTime.Sub(lastWarnedTimestamp) > (2 * time.Duration(12*32) * time.Second) {
+					k2.log.Warnf("No registration events received yet from your node for more than 2 epochs since mevPlus started")
+					k2.log.Debug("Please check your node and mevPlus are configured correctly for the builder api")
+					lastWarnedTimestamp = currentTime
+				}
+			}else if currentTime.Sub(k2.lastRegistrationMessageTimestamp) > (2 * time.Duration(12*32) * time.Second) {
+				// Send warning message every 2 mins if there is a warning to be sent
+				if currentTime.Sub(lastWarnedTimestamp) > (2 * time.Minute) {
+					k2.log.Warnf("No registration events received for more than 2 epochs from your node, last processed timestamp: %v", k2.lastRegistrationMessageTimestamp)
+					k2.log.Debug("Please check your node and mevPlus are configured correctly for the builder api")
+					lastWarnedTimestamp = currentTime
+				}
+			}
+			k2.lock.Unlock()
+		}
+	}
+
 }
 
 func (k2 *K2Service) Stop() error {
@@ -278,10 +334,22 @@ func (k2 *K2Service) RegisterValidator(payload []apiv1.SignedValidatorRegistrati
 		return nil, nil
 	}
 
+	var recentTimestamp time.Time
 	var proposers []string
 	for _, reg := range payload {
 		proposers = append(proposers, reg.Message.Pubkey.String())
+		if reg.Message.Timestamp.After(recentTimestamp) {
+			recentTimestamp = reg.Message.Timestamp
+		}
 	}
+
+	k2.log.Debugf("Registering validators: %v", proposers)
+
+	k2.lock.Lock()
+	if recentTimestamp.After(k2.lastRegistrationMessageTimestamp) {
+		k2.lastRegistrationMessageTimestamp = recentTimestamp
+	}
+	k2.lock.Unlock()
 
 	return k2.batchProcessValidatorRegistrations(payload)
 }

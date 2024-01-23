@@ -37,3 +37,9 @@ type Validator struct {
 	ExitEpoch uint64 `json:"exit_epoch,string"`
 	WithdrawableEpoch uint64 `json:"withdrawable_epoch,string"`
 }
+
+type HeadEventData struct {
+	Slot  uint64 `json:"slot,string"`
+	Block string `json:"block"`
+	State string `json:"state"`
+}
