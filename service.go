@@ -47,7 +47,8 @@ type K2Service struct {
 
 	exit chan struct{}
 
-	cfg config.K2Config
+	configured bool
+	cfg        config.K2Config
 }
 
 func NewK2Service() *K2Service {
@@ -80,7 +81,7 @@ func (k2 *K2Service) Start() error {
 		return err
 	}
 
-	if k2.cfg.ValidatorWalletPrivateKey == nil {
+	if !k2.configured {
 		// module not configured to run
 		return nil
 	}
@@ -151,7 +152,7 @@ func (k2 *K2Service) monitor() error {
 					k2.log.Debug("Please check your node and mevPlus are configured correctly for the builder api")
 					lastWarnedTimestamp = currentTime
 				}
-			}else if currentTime.Sub(k2.lastRegistrationMessageTimestamp) > (2 * time.Duration(12*32) * time.Second) {
+			} else if currentTime.Sub(k2.lastRegistrationMessageTimestamp) > (2 * time.Duration(12*32) * time.Second) {
 				// Send warning message every 2 mins if there is a warning to be sent
 				if currentTime.Sub(lastWarnedTimestamp) > (2 * time.Minute) {
 					k2.log.Warnf("No registration events received for more than 2 epochs from your node, last processed timestamp: %v", k2.lastRegistrationMessageTimestamp)
@@ -218,18 +219,68 @@ func (k2 *K2Service) Configure(moduleFlags common.ModuleFlags) (err error) {
 	// check if chain id is supported
 	knownConfig, ok := config.K2ConfigConstants[chainId]
 	if !ok {
-		return fmt.Errorf("chain id %v is not supported", chainId)
+
+		// check if the module has provided contract addresses by the user
+		if k2.cfg.RegistrationOnly {
+			// If registration only and not supported check for provided ProposerRegistryContractAddress
+			if k2.cfg.ProposerRegistryContractAddress != (ethcommon.Address{}) {
+				k2.log.Debug("User provided ProposerRegistryContractAddress for registration only")
+			} else {
+				return fmt.Errorf("chain id %v is not supported", chainId)
+			}
+		} else if k2.cfg.K2LendingContractAddress != (ethcommon.Address{}) || k2.cfg.K2NodeOperatorContractAddress != (ethcommon.Address{}) {
+			// If K2 enabled and not supported check for provided K2LendingContractAddress and K2NodeOperatorContractAddress
+			// either contract addresses were provided by the user
+			// require the need for both contract addresses to be provided
+			if k2.cfg.K2LendingContractAddress == (ethcommon.Address{}) || k2.cfg.K2NodeOperatorContractAddress == (ethcommon.Address{}) {
+				return fmt.Errorf("provide both K2LendingContractAddress and K2NodeOperatorContractAddress for chain id %v", chainId)
+			}
+
+			// Signature swapper and balance verifier are required for K2 operations
+			// but no need to check if the user provided SignatureSwapperUrl and BalanceVerificationUrl here
+			// as the individual services will check for the required configuration and throw an error if not provided
+
+			// No need to further check if the user provided ProposerRegistryContractAddress in addition as this can be obtained from the k2 contracts
+			k2.log.Debug("User provided K2LendingContractAddress and K2NodeOperatorContractAddress")
+		} else {
+			return fmt.Errorf("chain id %v is not supported", chainId)
+		}
+	} else {
+		// beacon node chain id is supported, set the rest of the config and use any provided contract addresses or urls as overrides
+		if k2.cfg.K2LendingContractAddress == (ethcommon.Address{}) {
+			k2.cfg.K2LendingContractAddress = knownConfig.K2LendingContractAddress
+		} else {
+			k2.log.Debugf("User provided K2LendingContractAddress: %s", k2.cfg.K2LendingContractAddress.String())
+		}
+
+		if k2.cfg.K2NodeOperatorContractAddress == (ethcommon.Address{}) {
+			k2.cfg.K2NodeOperatorContractAddress = knownConfig.K2NodeOperatorContractAddress
+		} else {
+			k2.log.Debugf("User provided K2NodeOperatorContractAddress: %s", k2.cfg.K2NodeOperatorContractAddress.String())
+		}
+
+		if k2.cfg.ProposerRegistryContractAddress == (ethcommon.Address{}) {
+			k2.cfg.ProposerRegistryContractAddress = knownConfig.ProposerRegistryContractAddress
+		} else {
+			k2.log.Debugf("User provided ProposerRegistryContractAddress: %s", k2.cfg.ProposerRegistryContractAddress.String())
+		}
+
+		if k2.cfg.SignatureSwapperUrl == nil {
+			k2.cfg.SignatureSwapperUrl = knownConfig.SignatureSwapperUrl
+		} else {
+			k2.log.Debugf("User provided SignatureSwapperUrl: %s", k2.cfg.SignatureSwapperUrl.String())
+		}
+
+		if k2.cfg.BalanceVerificationUrl == nil {
+			k2.cfg.BalanceVerificationUrl = knownConfig.BalanceVerificationUrl
+		} else {
+			k2.log.Debugf("User provided BalanceVerificationUrl: %s", k2.cfg.BalanceVerificationUrl.String())
+		}
 	}
-	// beacon node chain id is supported, set the rest of the config
-	k2.cfg.K2LendingContractAddress = knownConfig.K2LendingContractAddress
-	k2.cfg.K2NodeOperatorContractAddress = knownConfig.K2NodeOperatorContractAddress
-	k2.cfg.ProposerRegistryContractAddress = knownConfig.ProposerRegistryContractAddress
-	k2.cfg.SignatureSwapperUrl = knownConfig.SignatureSwapperUrl
-	k2.cfg.BalanceVerificationUrl = knownConfig.BalanceVerificationUrl
 
 	if k2.cfg.RegistrationOnly {
 		// module configured to only register validators and not delegate
-		k2.log.Debugf("Module configured to only register validators and not delegate")
+		k2.log.Debug("Module configured to only register validators and not delegate")
 		k2.cfg.K2LendingContractAddress = ethcommon.Address{}
 		k2.cfg.K2NodeOperatorContractAddress = ethcommon.Address{}
 	}
@@ -242,7 +293,7 @@ func (k2 *K2Service) Configure(moduleFlags common.ModuleFlags) (err error) {
 		ProposerRegistryContractAddress: k2.cfg.ProposerRegistryContractAddress,
 		ValidatorWalletPrivateKey:       k2.cfg.ValidatorWalletPrivateKey,
 		ValidatorWalletAddress:          k2.cfg.ValidatorWalletAddress,
-	})
+	}, k2.log)
 	if err != nil {
 		return err
 	}
@@ -329,7 +380,7 @@ func (k2 *K2Service) Status() error {
 
 func (k2 *K2Service) RegisterValidator(payload []apiv1.SignedValidatorRegistration) ([]k2common.K2ValidatorRegistration, error) {
 
-	if k2.cfg.ValidatorWalletPrivateKey == nil {
+	if !k2.configured {
 		// module not configured to run
 		return nil, nil
 	}

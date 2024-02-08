@@ -23,14 +23,17 @@ import (
 type EthService struct {
 	client *ethclient.Client
 	cfg    config.EthServiceConfig
+
+	log *logrus.Entry
 }
 
 func NewEthService() *EthService {
 	return &EthService{}
 }
 
-func (e *EthService) Configure(cfg config.EthServiceConfig) error {
+func (e *EthService) Configure(cfg config.EthServiceConfig, logger *logrus.Entry) error {
 	e.cfg = cfg
+	e.log = logger
 
 	err := e.connect(cfg.ExecutionNodeUrl)
 	if err != nil {
@@ -54,14 +57,30 @@ func (e *EthService) Configure(cfg config.EthServiceConfig) error {
 			return err
 		}
 
-		proposerRegistryAddress, err := e.FetchProposerRegistryAddressFromK2()
+		k2LendingProposerRegistryAddress, err := e.FetchProposerRegistryAddressFromK2Lending()
+		if err != nil {
+			return err
+		}
+		k2NodeOperatorProposerRegistryAddress, err := e.FetchProposerRegistryAddressFromK2NodeOperator()
 		if err != nil {
 			return err
 		}
 
+		// check that both k2 contracts are pointing to the same Proposer Registry contract
+		if k2LendingProposerRegistryAddress != k2NodeOperatorProposerRegistryAddress {
+			return fmt.Errorf("k2 Lending and NodeOperator contracts are pointing to different proposer registry contracts")
+		}
+
 		// check that the Proposer Registry address matches what is configured if not override
-		if proposerRegistryAddress != cfg.ProposerRegistryContractAddress.String() {
-			cfg.ProposerRegistryContractAddress = common.HexToAddress(proposerRegistryAddress)
+		if k2LendingProposerRegistryAddress != cfg.ProposerRegistryContractAddress.String() {
+			e.log.WithFields(
+				logrus.Fields{
+					"configuredProposerRegistryAddress":     cfg.ProposerRegistryContractAddress.String(),
+					"k2LendingProposerRegistryAddress":      k2LendingProposerRegistryAddress,
+					"k2NodeOperatorProposerRegistryAddress": k2NodeOperatorProposerRegistryAddress,
+				},
+			).Warn("Proposer Registry contract address mismatch, overriding with the one from K2 contracts")
+			cfg.ProposerRegistryContractAddress = common.HexToAddress(k2LendingProposerRegistryAddress)
 		}
 
 	}
@@ -112,7 +131,7 @@ func (e *EthService) SetMaxGasPrice(maxGasPrice uint64) {
 	}
 }
 
-func (e *EthService) FetchProposerRegistryAddressFromK2() (string, error) {
+func (e *EthService) FetchProposerRegistryAddressFromK2Lending() (string, error) {
 
 	data, err := e.cfg.K2LendingContractABI.Pack("proposerRegistry")
 	if err != nil {
@@ -130,6 +149,31 @@ func (e *EthService) FetchProposerRegistryAddressFromK2() (string, error) {
 
 	var contractAddress common.Address
 	err = e.cfg.K2LendingContractABI.UnpackIntoInterface(&contractAddress, "proposerRegistry", callResult)
+	if err != nil {
+		return "", err
+	}
+
+	return contractAddress.String(), nil
+}
+
+func (e *EthService) FetchProposerRegistryAddressFromK2NodeOperator() (string, error) {
+
+	data, err := e.cfg.K2NodeOperatorContractABI.Pack("proposerRegistry")
+	if err != nil {
+		return "", err
+	}
+
+	callResult, err := e.client.CallContract(context.Background(), ethereum.CallMsg{
+		From: e.cfg.ValidatorWalletAddress,
+		To:   &e.cfg.K2NodeOperatorContractAddress,
+		Data: data,
+	}, nil)
+	if err != nil {
+		return "", err
+	}
+
+	var contractAddress common.Address
+	err = e.cfg.K2NodeOperatorContractABI.UnpackIntoInterface(&contractAddress, "proposerRegistry", callResult)
 	if err != nil {
 		return "", err
 	}

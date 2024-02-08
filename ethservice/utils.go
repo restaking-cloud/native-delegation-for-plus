@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/sirupsen/logrus"
-
 	ethereum "github.com/ethereum/go-ethereum"
 	types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -18,7 +16,7 @@ func (e *EthService) waitTx(ctx context.Context, tx *types.Transaction) (*types.
 	queryTicker := time.NewTicker(time.Second)
 	defer queryTicker.Stop()
 
-	logger := logrus.WithField("moduleExecution", "k2").WithField("tx", tx.Hash().Hex())
+	logger := e.log.WithField("tx", tx.Hash().Hex())
 	for {
 		receipt, err := e.client.TransactionReceipt(ctx, tx.Hash())
 		if err == nil {
@@ -85,7 +83,7 @@ func (e *EthService) transact(context context.Context, tx *types.Transaction, pk
 		return signedTx, fmt.Errorf("failed to sign tx: %w", err)
 	}
 
-	logger := logrus.WithField("moduleExecution", "k2").WithField("tx", signedTx.Hash().Hex())
+	logger := e.log.WithField("tx", signedTx.Hash().Hex())
 	var pending bool
 
 	sendErr := e.client.SendTransaction(context, signedTx)
@@ -112,7 +110,7 @@ func (e *EthService) transactAndWait(context context.Context, tx *types.Transact
 		return executedTx, err
 	}
 
-	logger := logrus.WithField("moduleExecution", "k2").WithField("tx", executedTx.Hash().Hex())
+	logger := e.log.WithField("tx", executedTx.Hash().Hex())
 
 	logger.Info("K2 Module EthService: Waiting for transaction to be mined")
 

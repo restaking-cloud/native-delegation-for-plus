@@ -30,5 +30,10 @@ func k2Flags() []cli.Flag {
 		RegistrationOnlyFlag,
 		ListenAddressFlag,
 		ClaimThresholdFlag,
+		K2LendingContractAddressFlag,
+		K2NodeOperatorContractAddressFlag,
+		ProposerRegistryContractAddressFlag,
+		SignatureSwapperUrlFlag,
+		BalanceVerificationUrlFlag,
 	}
 }

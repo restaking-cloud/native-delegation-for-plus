@@ -28,7 +28,7 @@ func (k2 *K2Service) parseConfig(moduleFlags common.ModuleFlags) (err error) {
 		case config.WalletPrivateKeyFlag.Name:
 			pk, err := crypto.HexToECDSA(strings.TrimPrefix(flagValue, "0x"))
 			if err != nil {
-				return fmt.Errorf("-%s: invalid wallet private private key %q", config.WalletPrivateKeyFlag.Name, pk)
+				return fmt.Errorf("-%s: invalid wallet private private key %q", config.WalletPrivateKeyFlag.Name, flagValue)
 			}
 			k2.cfg.ValidatorWalletPrivateKey = pk
 
@@ -88,10 +88,41 @@ func (k2 *K2Service) parseConfig(moduleFlags common.ModuleFlags) (err error) {
 			if k2.cfg.ClaimThreshold < 0 {
 				return fmt.Errorf("-%s: claim threshold KETH amount must be positive", config.ClaimThresholdFlag.Name)
 			}
+		case config.K2LendingContractAddressFlag.Name:
+			k2.cfg.K2LendingContractAddress = eth1Common.HexToAddress(flagValue)
+			if k2.cfg.K2LendingContractAddress == (eth1Common.Address{}) {
+				return fmt.Errorf("-%s: invalid address %q", config.K2LendingContractAddressFlag.Name, flagValue)
+			}
+		case config.K2NodeOperatorContractAddressFlag.Name:
+			k2.cfg.K2NodeOperatorContractAddress = eth1Common.HexToAddress(flagValue)
+			if k2.cfg.K2NodeOperatorContractAddress == (eth1Common.Address{}) {
+				return fmt.Errorf("-%s: invalid address %q", config.K2NodeOperatorContractAddressFlag.Name, flagValue)
+			}
+		case config.ProposerRegistryContractAddressFlag.Name:
+			k2.cfg.ProposerRegistryContractAddress = eth1Common.HexToAddress(flagValue)
+			if k2.cfg.ProposerRegistryContractAddress == (eth1Common.Address{}) {
+				return fmt.Errorf("-%s: invalid address %q", config.ProposerRegistryContractAddressFlag.Name, flagValue)
+			}
+		case config.SignatureSwapperUrlFlag.Name:
+			k2.cfg.SignatureSwapperUrl, err = k2common.CreateUrl(flagValue)
+			if err != nil {
+				return fmt.Errorf("-%s: invalid url %q", config.SignatureSwapperUrlFlag.Name, flagValue)
+			}
+		case config.BalanceVerificationUrlFlag.Name:
+			k2.cfg.BalanceVerificationUrl, err = k2common.CreateUrl(flagValue)
+			if err != nil {
+				return fmt.Errorf("-%s: invalid url %q", config.BalanceVerificationUrlFlag.Name, flagValue)
+			}
 		default:
 			return fmt.Errorf("unknown flag %q", flagName)
 		}
 
+	}
+
+	if len(moduleFlags) > 0 {
+		k2.lock.Lock()
+		k2.configured = true
+		k2.lock.Unlock()
 	}
 
 	err = k2.checkConfig()
@@ -104,11 +135,15 @@ func (k2 *K2Service) parseConfig(moduleFlags common.ModuleFlags) (err error) {
 
 func (k2 *K2Service) checkConfig() error {
 
-	// if none of the flags are set, return
-	if k2.cfg.ValidatorWalletPrivateKey == nil && k2.cfg.Web3SignerUrl == nil && k2.cfg.BeaconNodeUrl == nil && k2.cfg.ExecutionNodeUrl == nil {
-		// module not configured to run
+	k2.lock.Lock()
+	defer k2.lock.Unlock()
+
+	if !k2.configured {
+		// If not set to run, return
 		return nil
 	}
+
+	k2.configured = false
 
 	// check that the execution node url is set
 	if k2.cfg.ExecutionNodeUrl == nil {
@@ -137,6 +172,8 @@ func (k2 *K2Service) checkConfig() error {
 			return err
 		}
 	}
+
+	k2.configured = true
 
 	return nil
 }

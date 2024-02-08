@@ -59,4 +59,29 @@ var (
 		Usage:    "The threshold for claiming rewards, in KETH",
 		Category: strings.ReplaceAll(strings.ToUpper(ModuleName), "_", " "),
 	}
+	K2LendingContractAddressFlag = &cli.StringFlag{
+		Name:     ModuleName + "." + "k2-lending-contract-address",
+		Usage:    "The address of the K2 lending contract to override the internal configuration",
+		Category: strings.ReplaceAll(strings.ToUpper(ModuleName), "_", " "),
+	}
+	K2NodeOperatorContractAddressFlag = &cli.StringFlag{
+		Name:     ModuleName + "." + "k2-node-operator-contract-address",
+		Usage:    "The address of the K2 node operator contract to override the internal configuration",
+		Category: strings.ReplaceAll(strings.ToUpper(ModuleName), "_", " "),
+	}
+	ProposerRegistryContractAddressFlag = &cli.StringFlag{
+		Name:     ModuleName + "." + "proposer-registry-contract-address",
+		Usage:    "The address of the proposer registry contract to override the internal configuration",
+		Category: strings.ReplaceAll(strings.ToUpper(ModuleName), "_", " "),
+	}
+	SignatureSwapperUrlFlag = &cli.StringFlag{
+		Name:     ModuleName + "." + "signature-swapper-url",
+		Usage:    "The url of the signature swapper to override the internal configuration",
+		Category: strings.ReplaceAll(strings.ToUpper(ModuleName), "_", " "),
+	}
+	BalanceVerificationUrlFlag = &cli.StringFlag{
+		Name:     ModuleName + "." + "balance-verification-url",
+		Usage:    "The url of the balance verification service to override the internal configuration",
+		Category: strings.ReplaceAll(strings.ToUpper(ModuleName), "_", " "),
+	}
 )
