@@ -40,7 +40,8 @@ type K2Service struct {
 
 	server *http.Server
 
-	exclusionList map[string]k2common.ExcludedValidator
+	exclusionList         map[string]k2common.ExcludedValidator
+	representativeMapping map[string]ethcommon.Address // Fee recipient address -> Representative address
 
 	// Track the last most recent timestamp that was processed
 	lastRegistrationMessageTimestamp time.Time
@@ -88,7 +89,12 @@ func (k2 *K2Service) Start() error {
 
 	// start monitoring the exclusion list file
 	if k2.cfg.ExclusionListFile != "" {
-		go k2.watchExclusionList(k2.cfg.ExclusionListFile)
+		go k2.watchFile("exclusion list", k2.cfg.ExclusionListFile, k2.readExclusionList, k2.clearExclusionList)
+	}
+
+	// start monitoring the representative mapping file
+	if k2.cfg.RepresentativeMappingFile != "" {
+		go k2.watchFile("representative mapping", k2.cfg.RepresentativeMappingFile, k2.readRepresentativeMapping, k2.clearRepresentativeMapping)
 	}
 
 	registryEnabled := k2.cfg.ProposerRegistryContractAddress != ethcommon.Address{}
@@ -109,10 +115,15 @@ func (k2 *K2Service) Start() error {
 	// start monitoring
 	go k2.monitor()
 
+	var addresses []string
+	for _, wallet := range k2.cfg.ValidatorWallets {
+		addresses = append(addresses, wallet.Address.String())
+	}
+
 	k2.log.WithFields(logrus.Fields{
-		"representativeAddress": k2.cfg.ValidatorWalletAddress,
-		"registryEnabled":       registryEnabled,
-		"k2Enabled":             k2Enabled,
+		"representativeAddresss": addresses,
+		"registryEnabled":        registryEnabled,
+		"k2Enabled":              k2Enabled,
 	}).Info("Started K2 module")
 
 	return nil
@@ -168,8 +179,8 @@ func (k2 *K2Service) monitor() error {
 
 func (k2 *K2Service) Stop() error {
 
-	// stop monitoring the exclusion list file
-	if k2.cfg.ExclusionListFile != "" {
+	// stop monitoring files
+	if k2.cfg.ExclusionListFile != "" || k2.cfg.RepresentativeMappingFile != "" {
 		close(k2.exit)
 	}
 
@@ -291,8 +302,7 @@ func (k2 *K2Service) Configure(moduleFlags common.ModuleFlags) (err error) {
 		K2LendingContractAddress:        k2.cfg.K2LendingContractAddress,
 		K2NodeOperatorContractAddress:   k2.cfg.K2NodeOperatorContractAddress,
 		ProposerRegistryContractAddress: k2.cfg.ProposerRegistryContractAddress,
-		ValidatorWalletPrivateKey:       k2.cfg.ValidatorWalletPrivateKey,
-		ValidatorWalletAddress:          k2.cfg.ValidatorWalletAddress,
+		ValidatorWallets:                k2.cfg.ValidatorWallets,
 	}, k2.log)
 	if err != nil {
 		return err

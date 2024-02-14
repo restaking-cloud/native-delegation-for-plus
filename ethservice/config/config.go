@@ -1,9 +1,10 @@
 package config
 
 import (
-	"crypto/ecdsa"
 	"math/big"
 	"net/url"
+
+	k2common "github.com/restaking-cloud/native-delegation-for-plus/common"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
@@ -28,6 +29,5 @@ type EthServiceConfig struct {
 	MulticallContractAddress common.Address
 	MulticallContractABI     *abi.ABI
 
-	ValidatorWalletPrivateKey *ecdsa.PrivateKey
-	ValidatorWalletAddress    common.Address
+	ValidatorWallets []k2common.ValidatorWallet
 }

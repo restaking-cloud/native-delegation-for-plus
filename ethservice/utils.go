@@ -39,13 +39,17 @@ func (e *EthService) waitTx(ctx context.Context, tx *types.Transaction) (*types.
 
 func (e *EthService) transact(context context.Context, tx *types.Transaction, pk *ecdsa.PrivateKey) (signedTx *types.Transaction, err error) {
 
+	if pk == nil {
+		return signedTx, errors.New("private key provided for transaction is nil")
+	}
+
 	walletAddress := crypto.PubkeyToAddress(*pk.Public().(*ecdsa.PublicKey))
 	
 	gasPrice, err := e.client.SuggestGasPrice(context)
 	if err != nil {
 		return signedTx, fmt.Errorf("failed to retrieve current gas price: %w", err)
 	}
-	if e.cfg.MaxGasPrice != nil && gasPrice.Cmp(e.cfg.MaxGasPrice) > 0 {
+	if e.cfg.MaxGasPrice != nil && (e.cfg.MaxGasPrice.Sign() > 0) && gasPrice.Cmp(e.cfg.MaxGasPrice) > 0 {
 		return signedTx, fmt.Errorf("gas price (%s) is higher than max gas price (%s)", gasPrice.String(), e.cfg.MaxGasPrice.String())
 	}
 	gasTip, err := e.client.SuggestGasTipCap(context)

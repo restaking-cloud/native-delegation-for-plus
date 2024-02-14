@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"crypto/ecdsa"
 
 	"github.com/attestantio/go-eth2-client/spec/phase0"
 	ethereum "github.com/ethereum/go-ethereum"
@@ -15,8 +16,8 @@ import (
 	"github.com/sirupsen/logrus"
 
 	k2common "github.com/restaking-cloud/native-delegation-for-plus/common"
+	config "github.com/restaking-cloud/native-delegation-for-plus/ethservice/config"
 
-	"github.com/restaking-cloud/native-delegation-for-plus/ethservice/config"
 	"github.com/restaking-cloud/native-delegation-for-plus/ethservice/contracts"
 )
 
@@ -67,12 +68,12 @@ func (e *EthService) Configure(cfg config.EthServiceConfig, logger *logrus.Entry
 		}
 
 		// check that both k2 contracts are pointing to the same Proposer Registry contract
-		if k2LendingProposerRegistryAddress != k2NodeOperatorProposerRegistryAddress {
+		if !strings.EqualFold(k2LendingProposerRegistryAddress, k2NodeOperatorProposerRegistryAddress) {
 			return fmt.Errorf("k2 Lending and NodeOperator contracts are pointing to different proposer registry contracts")
 		}
 
 		// check that the Proposer Registry address matches what is configured if not override
-		if k2LendingProposerRegistryAddress != cfg.ProposerRegistryContractAddress.String() {
+		if !strings.EqualFold(k2LendingProposerRegistryAddress, cfg.ProposerRegistryContractAddress.String()) {
 			e.log.WithFields(
 				logrus.Fields{
 					"configuredProposerRegistryAddress":     cfg.ProposerRegistryContractAddress.String(),
@@ -112,7 +113,7 @@ func (e *EthService) SetMaxGasPrice(maxGasPrice uint64) {
 
 	e.cfg.MaxGasPrice = big.NewInt(int64(maxGasPrice))
 
-	logger := logrus.WithField("moduleExecution", "k2").WithField("maxGasPrice", e.cfg.MaxGasPrice.String())
+	logger := e.log.WithField("maxGasPrice", e.cfg.MaxGasPrice.String())
 	currentGasPrice, err := e.client.SuggestGasPrice(context.Background())
 	if err != nil {
 		logger.WithError(err).Debug("Failed to retrieve current gas price")
@@ -123,8 +124,8 @@ func (e *EthService) SetMaxGasPrice(maxGasPrice uint64) {
 		if percentage.Cmp(big.NewFloat(-0.3)) < 0 {
 			logger.WithFields(
 				logrus.Fields{
-					"currentGasPrice": currentGasPrice.String() + " gwei",
-					"maxGasPrice":     e.cfg.MaxGasPrice.String() + " gwei",
+					"currentGasPrice": currentGasPrice.String() + " Wei",
+					"maxGasPrice":     e.cfg.MaxGasPrice.String() + " Wei",
 				},
 			).Warn("Max gas price is more than 30% lower than current gas price, consider increasing it, else registrations might be paused for a long time")
 		}
@@ -139,7 +140,7 @@ func (e *EthService) FetchProposerRegistryAddressFromK2Lending() (string, error)
 	}
 
 	callResult, err := e.client.CallContract(context.Background(), ethereum.CallMsg{
-		From: e.cfg.ValidatorWalletAddress,
+		From: e.cfg.ValidatorWallets[0].Address, // use the first wallet to make the call as sender address is not important
 		To:   &e.cfg.K2LendingContractAddress,
 		Data: data,
 	}, nil)
@@ -164,7 +165,7 @@ func (e *EthService) FetchProposerRegistryAddressFromK2NodeOperator() (string, e
 	}
 
 	callResult, err := e.client.CallContract(context.Background(), ethereum.CallMsg{
-		From: e.cfg.ValidatorWalletAddress,
+		From: e.cfg.ValidatorWallets[0].Address, // use the first wallet to make the call as sender address is not important
 		To:   &e.cfg.K2NodeOperatorContractAddress,
 		Data: data,
 	}, nil)
@@ -213,7 +214,7 @@ func (e *EthService) BatchCheckRegisteredValidators(validators []phase0.BLSPubKe
 	}
 
 	batchCallResult, err := e.client.CallContract(context.Background(), ethereum.CallMsg{
-		From: e.cfg.ValidatorWalletAddress,
+		From: e.cfg.ValidatorWallets[0].Address, // use the first wallet to make the call as sender address is not important
 		To:   &e.cfg.MulticallContractAddress,
 		Data: multicallInputsEncoded,
 	}, nil)
@@ -266,6 +267,10 @@ func (e *EthService) BatchRegisterValidators(validatorRegistrations []k2common.K
 	}
 	var openClaim []bool
 
+	representative := k2common.ValidatorWallet{
+		Address: common.Address{},
+	}
+
 	for _, reg := range validatorRegistrations {
 
 		blsKeys = append(blsKeys, reg.SignedValidatorRegistration.Message.Pubkey[:])
@@ -296,6 +301,25 @@ func (e *EthService) BatchRegisterValidators(validatorRegistrations []k2common.K
 		})
 
 		openClaim = append(openClaim, true)
+
+		// If there is already a representative wallet, check if it matches the current registration
+		if representative.Address != (common.Address{}) {
+			if representative.Address != reg.RepresentativeAddress {
+				return nil, fmt.Errorf("batchRegisterProposerWithoutPayoutPoolRegistration payload contains different representative addresses: %s and %s", representative.Address.String(), reg.RepresentativeAddress)
+			}
+		} else {
+			// find the representative wallet from the configured wallets
+			for _, wallet := range e.cfg.ValidatorWallets {
+				if wallet.Address == reg.RepresentativeAddress {
+					representative = wallet
+					break
+				}
+			}
+			// If no representative wallet found, return error
+			if representative.Address == (common.Address{}) {
+				return nil, fmt.Errorf("representative wallet not found for address: %s", reg.RepresentativeAddress.String())
+			}
+		}
 	}
 
 	data, err := e.cfg.ProposerRegistryContractABI.Pack("batchRegisterProposerWithoutPayoutPoolRegistration", blsKeys, feeRecipients, blsSignatures, ecdsaSignatures, openClaim, feeRecipients)
@@ -306,7 +330,7 @@ func (e *EthService) BatchRegisterValidators(validatorRegistrations []k2common.K
 	executedTx, err := e.transactAndWait(context.Background(), types.NewTx(&types.DynamicFeeTx{
 		To:   &e.cfg.ProposerRegistryContractAddress,
 		Data: data,
-	}), e.cfg.ValidatorWalletPrivateKey)
+	}), representative.PrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("error sending batch register: %w", err)
 	}
@@ -346,7 +370,7 @@ func (e *EthService) BatchK2CheckRegisteredValidators(validators []phase0.BLSPub
 	}
 
 	batchCallResult, err := e.client.CallContract(context.Background(), ethereum.CallMsg{
-		From: e.cfg.ValidatorWalletAddress,
+		From: e.cfg.ValidatorWallets[0].Address, // use the first wallet to make the call as sender address is not important
 		To:   &e.cfg.MulticallContractAddress,
 		Data: multicallInputsEncoded,
 	}, nil)
@@ -382,6 +406,72 @@ func (e *EthService) BatchK2CheckRegisteredValidators(validators []phase0.BLSPub
 	return results, nil
 }
 
+func (e *EthService) NodeOperatorToPayoutRecipient(nodeOperatorAddresses []common.Address) (map[string]common.Address, error) {
+
+	var multicallInputs contracts.Multicall3AggregateArgs
+
+	results := make(map[string]common.Address)
+
+	if len(nodeOperatorAddresses) == 0 {
+		return results, nil
+	}
+
+	for _, nodeOperatorAddress := range nodeOperatorAddresses {
+
+		data, err := e.cfg.K2LendingContractABI.Pack("nodeOperatorToPayoutRecipient", nodeOperatorAddress)
+		if err != nil {
+			return nil, err
+		}
+
+		multicallInputs.Calls = append(multicallInputs.Calls, contracts.Call3{
+			Target:       e.cfg.K2LendingContractAddress,
+			CallData:     data,
+			AllowFailure: true,
+		})
+	}
+
+	multicallInputsEncoded, err := e.cfg.MulticallContractABI.Pack("aggregate3", multicallInputs.Calls)
+	if err != nil {
+		return nil, err
+	}
+
+	batchCallResult, err := e.client.CallContract(context.Background(), ethereum.CallMsg{
+		From: e.cfg.ValidatorWallets[0].Address, // use the first wallet to make the call as sender address is not important
+		To:   &e.cfg.MulticallContractAddress,
+		Data: multicallInputsEncoded,
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var batchCallResultDecoded contracts.Multicall3AggregateResult
+	err = e.cfg.MulticallContractABI.UnpackIntoInterface(&batchCallResultDecoded, "aggregate3", batchCallResult)
+	if err != nil {
+		return nil, fmt.Errorf("error unpacking batch call result: %w", err)
+	}
+
+	successfulChecks := make(map[string]common.Address)
+	failedChecks := make(map[string]common.Address)
+
+	for i, nodeOperatorAddress := range nodeOperatorAddresses {
+		if !batchCallResultDecoded.ReturnData[i].Success {
+			failedChecks[nodeOperatorAddress.String()] = common.Address{}
+			continue
+		}
+
+		successfulChecks[nodeOperatorAddress.String()] = common.BytesToAddress(batchCallResultDecoded.ReturnData[i].ReturnData)
+	}
+
+	for k, v := range successfulChecks {
+		results[k] = v
+	}
+	for k := range failedChecks {
+		results[k] = common.Address{}
+	}
+
+	return results, nil
+}
+
 func (e *EthService) K2BatchNativeDelegation(validatorRegistrations []k2common.K2ValidatorRegistration) (tx *types.Transaction, err error) {
 
 	// K2 deposit for native delegation
@@ -392,6 +482,10 @@ func (e *EthService) K2BatchNativeDelegation(validatorRegistrations []k2common.K
 		V uint8
 		R [32]byte
 		S [32]byte
+	}
+
+	representative := k2common.ValidatorWallet{
+		Address: common.Address{},
 	}
 
 	for _, reg := range validatorRegistrations {
@@ -422,6 +516,25 @@ func (e *EthService) K2BatchNativeDelegation(validatorRegistrations []k2common.K
 			R: sig_r32,
 			S: sig_s32,
 		})
+
+		// If there is already a representative wallet, check if it matches the current registration
+		if representative.Address != (common.Address{}) {
+			if representative.Address != reg.RepresentativeAddress {
+				return nil, fmt.Errorf("batchRegisterProposerWithoutPayoutPoolRegistration payload contains different representative addresses: %s and %s", representative.Address.String(), reg.RepresentativeAddress)
+			}
+		} else {
+			// find the representative wallet from the configured wallets
+			for _, wallet := range e.cfg.ValidatorWallets {
+				if wallet.Address == reg.RepresentativeAddress {
+					representative = wallet
+					break
+				}
+			}
+			// If no representative wallet found, return error
+			if representative.Address == (common.Address{}) {
+				return nil, fmt.Errorf("representative wallet not found for address: %s", reg.RepresentativeAddress.String())
+			}
+		}
 	}
 
 	data, err := e.cfg.K2LendingContractABI.Pack("batchNodeOperatorDeposit", blsKeys, feeRecipients, blsSignatures, ecdsaSignatures)
@@ -432,7 +545,7 @@ func (e *EthService) K2BatchNativeDelegation(validatorRegistrations []k2common.K
 	executedTx, err := e.transactAndWait(context.Background(), types.NewTx(&types.DynamicFeeTx{
 		To:   &e.cfg.K2LendingContractAddress,
 		Data: data,
-	}), e.cfg.ValidatorWalletPrivateKey)
+	}), representative.PrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("error sending batch node deposit: %w", err)
 	}
@@ -472,7 +585,7 @@ func (e *EthService) BatchK2CheckClaimableRewards(validators []phase0.BLSPubKey)
 	}
 
 	batchCallResult, err := e.client.CallContract(context.Background(), ethereum.CallMsg{
-		From: e.cfg.ValidatorWalletAddress,
+		From: e.cfg.ValidatorWallets[0].Address, // use the first wallet to make the call as sender address is not important
 		To:   &e.cfg.MulticallContractAddress,
 		Data: multicallInputsEncoded,
 	}, nil)
@@ -524,6 +637,9 @@ func (e *EthService) BatchK2ClaimRewards(rewardClaims []k2common.K2Claim) (tx *t
 		S [32]byte
 	}
 
+	// Claim can be triggered by any representative wallet, use the primary wallet
+	representative := e.cfg.ValidatorWallets[0]
+
 	for _, claim := range rewardClaims {
 
 		blsKeys = append(blsKeys, claim.ValidatorPubKey[:])
@@ -561,7 +677,7 @@ func (e *EthService) BatchK2ClaimRewards(rewardClaims []k2common.K2Claim) (tx *t
 	executedTx, err := e.transactAndWait(context.Background(), types.NewTx(&types.DynamicFeeTx{
 		To:   &e.cfg.K2NodeOperatorContractAddress,
 		Data: data,
-	}), e.cfg.ValidatorWalletPrivateKey)
+	}), representative.PrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("error sending batch claim: %w", err)
 	}
@@ -596,6 +712,14 @@ func (e *EthService) K2Exit(validatorExit k2common.K2Exit) (tx *types.Transactio
 		S: sig_s32,
 	}
 
+	var pk *ecdsa.PrivateKey
+	for _, wallet := range e.cfg.ValidatorWallets {
+		if wallet.Address == validatorExit.RepresentativeAddress {
+			pk = wallet.PrivateKey
+			break
+		}
+	}
+
 	data, err := e.cfg.K2NodeOperatorContractABI.Pack("nodeOperatorWithdraw", blsKey, effectiveBalance, ecdsaSignature)
 	if err != nil {
 		return nil, err
@@ -604,7 +728,7 @@ func (e *EthService) K2Exit(validatorExit k2common.K2Exit) (tx *types.Transactio
 	executedTx, err := e.transactAndWait(context.Background(), types.NewTx(&types.DynamicFeeTx{
 		To:   &e.cfg.K2NodeOperatorContractAddress,
 		Data: data,
-	}), e.cfg.ValidatorWalletPrivateKey)
+	}), pk)
 	if err != nil {
 		return nil, fmt.Errorf("error sending k2 exit: %w", err)
 	}
@@ -621,7 +745,7 @@ func (e *EthService) K2CheckInclusionList(nodeOperatorRepresentative common.Addr
 	}
 
 	callResult, err := e.client.CallContract(context.Background(), ethereum.CallMsg{
-		From: e.cfg.ValidatorWalletAddress,
+		From: e.cfg.ValidatorWallets[0].Address, // use the first wallet to make the call as sender address is not important
 		To:   &e.cfg.K2NodeOperatorContractAddress,
 		Data: data,
 	}, nil)
@@ -646,7 +770,7 @@ func (e *EthService) K2CheckInclusionListKeysCount(nodeOperatorRepresentative co
 	}
 
 	callResult, err := e.client.CallContract(context.Background(), ethereum.CallMsg{
-		From: e.cfg.ValidatorWalletAddress,
+		From: e.cfg.ValidatorWallets[0].Address, // use the first wallet to make the call as sender address is not important
 		To:   &e.cfg.K2NodeOperatorContractAddress,
 		Data: data,
 	}, nil)
@@ -671,7 +795,7 @@ func (e *EthService) IndividualMaxNativeDelegation() (*big.Int, error) {
 	}
 
 	callResult, err := e.client.CallContract(context.Background(), ethereum.CallMsg{
-		From: e.cfg.ValidatorWalletAddress,
+		From: e.cfg.ValidatorWallets[0].Address, // use the first wallet to make the call as sender address is not important
 		To:   &e.cfg.K2NodeOperatorContractAddress,
 		Data: data,
 	}, nil)
@@ -696,7 +820,7 @@ func (e *EthService) GetTotalNativeDelegationCapacityConsumed() (*big.Int, error
 	}
 
 	callResult, err := e.client.CallContract(context.Background(), ethereum.CallMsg{
-		From: e.cfg.ValidatorWalletAddress,
+		From: e.cfg.ValidatorWallets[0].Address, // use the first wallet to make the call as sender address is not important
 		To:   &e.cfg.K2NodeOperatorContractAddress,
 		Data: data,
 	}, nil)
@@ -721,7 +845,7 @@ func (e *EthService) GlobalMaxNativeDelegation() (*big.Int, error) {
 	}
 
 	callResult, err := e.client.CallContract(context.Background(), ethereum.CallMsg{
-		From: e.cfg.ValidatorWalletAddress,
+		From: e.cfg.ValidatorWallets[0].Address, // use the first wallet to make the call as sender address is not important
 		To:   &e.cfg.K2NodeOperatorContractAddress,
 		Data: data,
 	}, nil)

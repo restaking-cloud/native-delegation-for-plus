@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -19,6 +20,14 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 	k2.lock.Lock()
 	defer k2.lock.Unlock()
 
+	if len(payload) == 0 {
+		return nil, nil
+	}
+
+	// Default to using the primary representative address for the registrations
+	var representative k2common.ValidatorWallet = k2.cfg.ValidatorWallets[0]
+	var nodeOperatorTopayoutRecipientMapping map[string]common.Address = make(map[string]common.Address)
+
 	var globalMaxNativeDelegation *big.Int = big.NewInt(0)
 	var individualMaxNativeDelegation *big.Int = big.NewInt(0)
 
@@ -27,8 +36,8 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 
 	var isInInclusionList bool
 
-	var capacityChecksComplete atomic.Bool
-	var capacityChecksError atomic.Value
+	var preChecksComplete atomic.Bool
+	var preChecksError atomic.Value
 
 	// Start go routines to get the global and current individual native delegation
 	// if the currentGlobal is at the max then check the currentIndividual and maxIndividual
@@ -37,7 +46,7 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 			// If the module is configured for K2 operations in addition to Proposer Registry operations
 			// use a sync wait group to wait for the results of the global and individual native delegation checks
 			var wg sync.WaitGroup
-			wg.Add(2)
+			wg.Add(3)
 
 			go func() {
 				defer wg.Done()
@@ -45,7 +54,7 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 				globalMaxNativeDelegation, err = k2.eth1.GlobalMaxNativeDelegation()
 				if err != nil {
 					k2.log.WithError(err).Error("failed to get global max native delegation")
-					capacityChecksError.Store(err)
+					preChecksError.Store(err)
 					return
 				}
 				k2.log.WithField("globalMaxNativeDelegation", globalMaxNativeDelegation.String()).Debug("global max native delegation")
@@ -57,19 +66,108 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 				currentGlobalNativeDelegation, err = k2.eth1.GetTotalNativeDelegationCapacityConsumed()
 				if err != nil {
 					k2.log.WithError(err).Error("failed to get current global native delegation")
-					capacityChecksError.Store(err)
+					preChecksError.Store(err)
 					return
 				}
 				k2.log.WithField("currentGlobalNativeDelegation", currentGlobalNativeDelegation.String()).Debug("current global native delegation")
 			}()
 
+			go func() {
+				defer wg.Done()
+				var err error
+				configuredWalletAddresses := make([]common.Address, len(k2.cfg.ValidatorWallets))
+				for i, wallet := range k2.cfg.ValidatorWallets {
+					configuredWalletAddresses[i] = wallet.Address
+				}
+				nodeOperatorTopayoutRecipientMapping, err = k2.eth1.NodeOperatorToPayoutRecipient(configuredWalletAddresses)
+				if err != nil {
+					k2.log.WithError(err).Error("failed to get configured wallet addresses to payout recipient mapping")
+					preChecksError.Store(err)
+					return
+				}
+				k2.log.WithField("payoutRecipientCheck", nodeOperatorTopayoutRecipientMapping).Debug("configured wallet addresses to payout recipient mapping")
+			}()
+
 			wg.Wait()
 
-			if capacityChecksError.Load() != nil {
+			if preChecksError.Load() != nil {
 				// error occurred while getting the global and current individual native delegation
 				// so cannot proceed with the registrations
-				k2.log.WithError(capacityChecksError.Load().(error)).Error("failed to get global and current individual native delegation")
+				k2.log.WithError(preChecksError.Load().(error)).Error("failed to get global and current individual native delegation")
 				return
+			}
+
+			// if k2 operations then the right representative address to use for the registrations must be determined
+			payloadFeeRecipient := payload[0].Message.FeeRecipient // can do this safely as batch processing would have grouped by feeRecipient
+			var representativeFound bool
+			// check if there is a strict representative address for the payload's fee recipient
+			if useRepAddress, ok := k2.representativeMapping[payloadFeeRecipient.String()]; ok {
+				for _, wallet := range k2.cfg.ValidatorWallets {
+					if strings.EqualFold(wallet.Address.String(), useRepAddress.String()) {
+						representative = wallet
+						representativeFound = true
+						break
+					}
+				}
+				if !representativeFound {
+					// representative not not configured in the module for the payload's fee recipient
+					// throw an error since module cant strictly use this wallet
+					k2.log.WithFields(logrus.Fields{
+						"payloadFeeRecipient": payloadFeeRecipient.String(),
+						"representative":      useRepAddress.String(),
+					}).Error("strict representative address for payload's fee recipient not configured")
+					preChecksError.Store(fmt.Errorf("strict representative address (%s) for payload's fee recipient (%s) not configured", useRepAddress.String(), payloadFeeRecipient.String()))
+					return
+				} else {
+					// If representative configured, check if the representative has been used in the k2 lending contract
+					// before, and if so is the fee recipient the same as the payload's fee recipient
+					payoutRecipient := nodeOperatorTopayoutRecipientMapping[representative.Address.String()]
+					if !strings.EqualFold(payoutRecipient.String(), payloadFeeRecipient.String()) {
+						k2.log.WithFields(logrus.Fields{
+							"payloadFeeRecipient":  payloadFeeRecipient.String(),
+							"representative":       representative.Address.String(),
+							"setK2PayoutRecipient": payoutRecipient.String(),
+						}).Error("strict representative address for payload's fee recipient does not match the set payout recipient in the contracts for this representative")
+						preChecksError.Store(fmt.Errorf("strict representative address (%s) for payload's fee recipient (%s) does not match the set payout recipient (%s) in the contracts for this representative", representative.Address.String(), payloadFeeRecipient.String(), payoutRecipient.String()))
+						return
+					}
+
+				}
+
+				k2.log.WithFields(logrus.Fields{
+					"payloadFeeRecipient": payloadFeeRecipient.String(),
+					"representative":      representative.Address.String(),
+				}).Debug("using strict representative address for payload's fee recipient")
+			} else { // if no strict representative address for the payload's fee recipient then determine the right representative address to use
+				var unusedRepresentative k2common.ValidatorWallet = k2common.ValidatorWallet{
+					Address: common.Address{},
+				} // holds the next available unused representative address configured
+				for _, wallet := range k2.cfg.ValidatorWallets { // Check wallets in order of priority set in the configuration
+					payoutRecipient := nodeOperatorTopayoutRecipientMapping[wallet.Address.String()]
+					if strings.EqualFold(payoutRecipient.String(), payloadFeeRecipient.String()) {
+						representative = wallet // representative found for the set feeRecipient continue further native delegation using this representative as payload fee recipients match
+						representativeFound = true
+						break
+					} else if (payoutRecipient == common.Address{}) && (unusedRepresentative.Address == common.Address{}) {
+						// representative not found for the feeRecipient check if the wallet has not been used and is available
+						// if a fresh native delegation for these validators with this feeRecipient is needed
+						unusedRepresentative = wallet
+					}
+				}
+				if !representativeFound {
+					// Representative not found in contract for this payload's payout recipient
+					// check if there is an avaialable representative that has not been used
+					if unusedRepresentative.Address == (common.Address{}) {
+						// no representative available for this payload's payout recipient
+						// as all wallets configured have a payout recipient in the k2 lending contracts that do not match the payload's fee recipient thus
+						// these validators cannot be registered under this node operator's representative address as they do not pay to the specified payout recipient
+						k2.log.WithField("payloadFeeRecipient", payloadFeeRecipient.String()).Error("no representative available for this payload's payout recipient. Add another wallet to your config")
+						preChecksError.Store(fmt.Errorf("no configured representative available for this payload's fee recipient [%s]; add another wallet to your config", payloadFeeRecipient.String()))
+						return
+					}
+					// use the next available representative address that has not been used
+					representative = unusedRepresentative
+				}
 			}
 
 			if globalMaxNativeDelegation != nil && currentGlobalNativeDelegation != nil && globalMaxNativeDelegation.Cmp(currentGlobalNativeDelegation) <= 0 {
@@ -77,18 +175,19 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 				// so need to check individual max native delegation
 				k2.log.WithField("globalMaxNativeDelegation", globalMaxNativeDelegation.String()).Debug("global max native delegation has been reached")
 
-				isInInclusionList, err := k2.eth1.K2CheckInclusionList(k2.cfg.ValidatorWalletAddress)
+				isInInclusionList, err := k2.eth1.K2CheckInclusionList(representative.Address)
 				if err != nil {
-					k2.log.WithError(err).Error("failed to check if validator is in inclusion list")
-					capacityChecksError.Store(err)
+					k2.log.WithError(err).Error("failed to check if validator's representative address is in inclusion list")
+					preChecksError.Store(err)
 					return
 				}
 
 				if !isInInclusionList {
-					// validator is not in the inclusion list
+					// validator representative is not in the inclusion list
 					// so cannot natively delegate this validator
-					k2.log.WithField("validatorPubKey", k2.cfg.ValidatorWalletAddress.String()).Debug("validator is not in the inclusion list")
-					capacityChecksComplete.Store(true)
+					k2.log.WithField("validatorRepresentative", representative.Address.String()).Debug("validator's representative is not in the inclusion list")
+					// this is not an error and just means that the validator's representative address is not in the inclusion list to exceed the global max native delegation
+					preChecksComplete.Store(true)
 					return
 				}
 
@@ -101,8 +200,8 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 					var err error
 					individualMaxNativeDelegation, err = k2.eth1.IndividualMaxNativeDelegation()
 					if err != nil {
-						k2.log.WithError(err).Error("failed to get individual max native delegation")
-						capacityChecksError.Store(err)
+						k2.log.WithError(err).Errorf("failed to get individual max native delegation for representative: %s", representative.Address.String())
+						preChecksError.Store(err)
 						return
 					}
 					k2.log.WithField("individualMaxNativeDelegation", individualMaxNativeDelegation.String()).Debug("individual max native delegation")
@@ -111,38 +210,42 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 				go func() {
 					defer wg.Done()
 					var err error
-					currentIndividualNativeDelegation, err := k2.eth1.K2CheckInclusionListKeysCount(k2.cfg.ValidatorWalletAddress)
+					currentIndividualNativeDelegation, err := k2.eth1.K2CheckInclusionListKeysCount(representative.Address)
 					if err != nil {
-						k2.log.WithError(err).Error("failed to get current individual native delegation")
-						capacityChecksError.Store(err)
+						k2.log.WithError(err).Errorf("failed to get current individual native delegation for representative: %s", representative.Address.String())
+						preChecksError.Store(err)
 						return
 					}
-					k2.log.WithField("currentIndividualNativeDelegation", currentIndividualNativeDelegation.String()).Debug("current individual native delegation")
+					k2.log.WithField("currentIndividualNativeDelegation", currentIndividualNativeDelegation.String()).Debugf("current individual native delegation for representative: %s", representative.Address.String())
 				}()
 
 				wg.Wait()
 
-				if capacityChecksError.Load() != nil {
+				if preChecksError.Load() != nil {
 					// error occurred while getting the individual native delegation
 					// so cannot proceed with the registrations
-					k2.log.WithError(capacityChecksError.Load().(error)).Error("failed to get individual native delegation")
+					k2.log.WithError(preChecksError.Load().(error)).Error("failed to get individual native delegation")
 					return
 				}
 
-				capacityChecksComplete.Store(true)
+				preChecksComplete.Store(true)
 			} else {
 				// global max native delegation has not been reached
 				// so no need to check individual max native delegation
 				k2.log.WithField("globalMaxNativeDelegation", globalMaxNativeDelegation.String()).Debug("global max native delegation has not been reached")
-				capacityChecksComplete.Store(true)
+				preChecksComplete.Store(true)
 			}
 		} else {
 			// If the module is configured for Proposer Registry operations only
 			// then no need to check the global max native delegation
-			capacityChecksComplete.Store(true)
-			k2.log.Debug("module is configured for Proposer Registry operations only, K2 capacity checks not required")
+			preChecksComplete.Store(true)
+			k2.log.Debug("module is configured for Proposer Registry operations only, K2 capacity and represenative checks not required")
 		}
+
 	}()
+
+	// if no recepient is set then use the default primary representative address to to process this registration batch
+	// else if there is already a fee recpient set then check if the module has that wallet configured and use that representative address
 
 	validators, payloadMap := k2common.GetListOfBLSKeysFromSignedValidatorRegistration(payload)
 
@@ -185,7 +288,7 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 	proposerRegistryAlreadyRegisteredCount := uint64(len(alreadyRegisteredMap))
 
 	// prepare registrations from the registrationsToProcess for the proposer registry
-	processValidators, err := k2.prepareRegistrations(registrationsToProcess)
+	processValidators, err := k2.prepareRegistrations(registrationsToProcess, representative.Address)
 	if err != nil {
 		return nil, err
 	}
@@ -205,21 +308,21 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 
 		if len(k2RegistrationResults) > 0 {
 			// Wait for the global and individual native delegation checks to complete or for there to be an error
-			for !capacityChecksComplete.Load() && capacityChecksError.Load() == nil {
+			for !preChecksComplete.Load() && preChecksError.Load() == nil {
 				k2.log.Debug("waiting for global and individual native delegation checks to complete")
 			}
 		}
 
 		// if there is an error in the capacity checks then return the error
-		if capacityChecksError.Load() != nil {
-			return nil, capacityChecksError.Load().(error)
+		if preChecksError.Load() != nil {
+			return nil, preChecksError.Load().(error)
 		}
 
 		var k2OnlyRegistrationsToProcess []apiv1.SignedValidatorRegistration
 
 		// prepare K2 only registrations
 		for validator, registered := range k2RegistrationResults {
-			if registered == (common.Address{}.String()) {
+			if strings.EqualFold(registered, common.Address{}.String()) {
 				// this is a validator that is not registered in the K2 contract
 				if registration, ok := alreadyRegisteredMap[validator]; !ok {
 					// this is a validator that is not registered in the Proposer Registry
@@ -249,17 +352,22 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 					}
 
 					// check if the representative address is the same as the one configured
-					if registration.RepresentativeAddress != k2.cfg.ValidatorWalletAddress {
+					if registration.RepresentativeAddress != representative.Address {
 						// representative address is not the same as the one configured for the module
 						// so cannot take action on this validator
-						k2.log.WithField("validatorPubKey", validator).Debugf("validator is already registered in the Proposer Registry, but the representative address is not the same as the one configured")
+						k2.log.WithFields(
+							logrus.Fields{
+								"validatorPubKey":          validator,
+								"representativeAddress":    registration.RepresentativeAddress.String(),
+								"configuredRepresentative": representative.Address.String(),
+							}).Debugf("validator is already registered in the Proposer Registry, but the representative address is not the same as the one configured for this registration")
 						k2UnsuppportedCount++
 						continue
 					}
 
 					// check if the the fee recipient from the node matches that from the contract for
 					// that validator's registration message else the signature will not be valid
-					if registration.SignedValidatorRegistration.Message.FeeRecipient.String() != payloadMap[validator].Message.FeeRecipient.String() {
+					if !strings.EqualFold(registration.SignedValidatorRegistration.Message.FeeRecipient.String(), payloadMap[validator].Message.FeeRecipient.String()) {
 						// fee recipient has changed between the registration message and the contract
 						// so cannot take action on this validator, as the node's signature will not be valid
 						// having signed a payload that has a different fee recipient from what the contract has
@@ -352,7 +460,7 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 		// process then it would already have an ECDSA Signature from the signature swapper that it woul use for both registration and native delegation
 
 		// Generate the signatures for the K2-only native delegations that were just added to the mapping
-		ecdsaSignatures, err := k2.signatureSwapper.BatchGenerateSignature(k2OnlyRegistrationsToProcess, k2.cfg.ValidatorWalletAddress)
+		ecdsaSignatures, err := k2.signatureSwapper.BatchGenerateSignature(k2OnlyRegistrationsToProcess, representative.Address)
 		if err != nil {
 			k2.log.WithError(err).Error("failed to generate signatures from signature swapper for native delegation")
 			return nil, err
@@ -612,9 +720,7 @@ func (k2 *K2Service) processExit(blsKey phase0.BLSPubKey) (res k2common.K2Exit, 
 		return res, fmt.Errorf("module not configured to run balance verification operations for exits")
 	}
 
-	k2.log.WithFields(logrus.Fields{
-		"configuredRepresentative": k2.cfg.ValidatorWalletAddress.String(),
-	}).Info("Checking Validator Representative Address")
+	k2.log.Info("Checking Validator Representative Address")
 
 	k2RegistrationResults, err := k2.eth1.BatchK2CheckRegisteredValidators([]phase0.BLSPubKey{blsKey})
 	if err != nil {
@@ -628,15 +734,24 @@ func (k2 *K2Service) processExit(blsKey phase0.BLSPubKey) (res k2common.K2Exit, 
 		return res, fmt.Errorf("validator is not registered in the K2 contract")
 	}
 
-	if representativeAddress != k2.cfg.ValidatorWalletAddress.String() {
+	var representative k2common.ValidatorWallet = k2.cfg.ValidatorWallets[0]
+	for _, wallet := range k2.cfg.ValidatorWallets {
+		if strings.EqualFold(wallet.Address.String(), representativeAddress) {
+			representative = wallet
+			break
+		}
+	}
+
+	if !strings.EqualFold(representativeAddress, representative.Address.String()) {
 		k2.log.WithFields(logrus.Fields{
-			"configuredRepresentative": k2.cfg.ValidatorWalletAddress.String(),
+			"configuredRepresentative": representative.Address.String(),
 			"validatorRepresentative":  representativeAddress,
-		}).Info("Validator Representative Address does not match configured representative address")
-		return res, fmt.Errorf("validator representative address does not match configured representative address")
+		}).Error("Validator Representative Address does not match configured representative address")
+		return res, fmt.Errorf("validator representative address does not match any configured representative address")
 	}
 
 	res.ValidatorPubKey = blsKey
+	res.RepresentativeAddress = representative.Address
 
 	// if authorized then get the effective balance of this validator and
 	// report to the balance verifier for a signature for the exit (un-delegation)
@@ -719,14 +834,45 @@ func (k2 *K2Service) batchProcessClaims(blsKeys []phase0.BLSPubKey) ([]k2common.
 }
 
 func (k2 *K2Service) batchProcessValidatorRegistrations(payload []apiv1.SignedValidatorRegistration) ([]k2common.K2ValidatorRegistration, error) {
-	// Split the payload into batches of 90 for the sake of gas efficiency, contract calls and signature swapping
+
+	if len(payload) == 0 {
+		return nil, nil
+	}
+
+	var feeRecipientMapping = make(map[string][]apiv1.SignedValidatorRegistration)
+	for _, reg := range payload {
+		feeRecipientMapping[reg.Message.FeeRecipient.String()] = append(feeRecipientMapping[reg.Message.FeeRecipient.String()], reg)
+	}
+	// then group in new sortedPayload by feeRecipient
+	var sortedPayload []apiv1.SignedValidatorRegistration
+	for feeRecipient, regs := range feeRecipientMapping {
+		sortedPayload = append(sortedPayload, regs...)
+		k2.log.Debugf("Payload contains registration for fee recipient: %s", feeRecipient)
+	}
+	payload = sortedPayload
+
+	// Group the payload into batches of 90 for gas efficiency, contract calls, and signature swapping,
+	// ensuring batches have the same fee recipient
 	var batches [][]apiv1.SignedValidatorRegistration
-	for i := 0; i < len(payload); i += 90 {
-		end := i + 90
-		if end > len(payload) {
-			end = len(payload)
+
+	var currentRecipient string
+	var currentBatch []apiv1.SignedValidatorRegistration
+	for i, registration := range payload {
+		if i > 0 && (len(currentBatch) == 90 || !strings.EqualFold(registration.Message.FeeRecipient.String(), currentRecipient)) {
+			// Append the current batch to batches if it's full or the fee recipient changes
+			batches = append(batches, currentBatch)
+			currentBatch = nil
 		}
-		batches = append(batches, payload[i:end])
+		// Update the current fee recipient if it's not set
+		if currentRecipient == "" {
+			currentRecipient = registration.Message.FeeRecipient.String()
+		}
+		// Append the current registration to the current batch
+		currentBatch = append(currentBatch, registration)
+	}
+	// Append the remaining batch
+	if len(currentBatch) > 0 {
+		batches = append(batches, currentBatch)
 	}
 
 	var results []k2common.K2ValidatorRegistration
@@ -745,7 +891,7 @@ func (k2 *K2Service) batchProcessValidatorRegistrations(payload []apiv1.SignedVa
 	return results, nil
 }
 
-func (k2 *K2Service) prepareRegistrations(toProcess map[string]apiv1.SignedValidatorRegistration) (map[string]k2common.K2ValidatorRegistration, error) {
+func (k2 *K2Service) prepareRegistrations(toProcess map[string]apiv1.SignedValidatorRegistration, representative common.Address) (map[string]k2common.K2ValidatorRegistration, error) {
 	// Retrieve the signable pubkeys from the web3signer on runtime since these can change whenever the node runner wishes
 	// only if web3signer is configured
 	var signablePubKeys map[string]bool = make(map[string]bool)
@@ -823,7 +969,7 @@ func (k2 *K2Service) prepareRegistrations(toProcess map[string]apiv1.SignedValid
 
 		// Create mapping of qualified registrations to proceed
 		registrations[signedRegistration.Message.Pubkey.String()] = k2common.K2ValidatorRegistration{
-			RepresentativeAddress:       k2.cfg.ValidatorWalletAddress,
+			RepresentativeAddress:       representative,
 			SignedValidatorRegistration: &signedRegistration,
 		}
 		signedRegistrations = append(signedRegistrations, signedRegistration)
@@ -831,7 +977,7 @@ func (k2 *K2Service) prepareRegistrations(toProcess map[string]apiv1.SignedValid
 	}
 
 	// Generate signatures for the qualified registration messages
-	ecdsaSignatures, err := k2.signatureSwapper.BatchGenerateSignature(signedRegistrations, k2.cfg.ValidatorWalletAddress)
+	ecdsaSignatures, err := k2.signatureSwapper.BatchGenerateSignature(signedRegistrations, representative)
 	if err != nil {
 		k2.log.WithError(err).Error("failed to generate signatures from signature swapper for proposer registration")
 		return nil, err

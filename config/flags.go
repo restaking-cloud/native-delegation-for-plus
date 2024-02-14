@@ -9,7 +9,7 @@ import (
 var (
 	WalletPrivateKeyFlag = &cli.StringFlag{
 		Name:     ModuleName + "." + "eth1-private-key",
-		Usage:    "The private key of the validator wallet",
+		Usage:    "The private key of the validator wallet. You can load multiple keys by separating them with a comma in order of priority",
 		Category: strings.ReplaceAll(strings.ToUpper(ModuleName), "_", " "),
 		EnvVars:  []string{"ETH1_PRIVATE_KEY"},
 	}
@@ -38,11 +38,15 @@ var (
 		Usage:    "The list of addresses to exclude from either the Proposer Registration or Native Delegation",
 		Category: strings.ReplaceAll(strings.ToUpper(ModuleName), "_", " "),
 	}
+	RepresentativeMappingFlag = &cli.StringFlag{
+		Name:     ModuleName + "." + "representative-mapping",
+		Usage:    "The mapping of representative addresses designated to handle validators that pay to different fee recipients",
+		Category: strings.ReplaceAll(strings.ToUpper(ModuleName), "_", " "),
+	}
 	MaxGasPriceFlag = &cli.Uint64Flag{
 		Name:     ModuleName + "." + "max-gas-price",
-		Usage:    "The maximum gas price to use for transactions, in Gwei",
+		Usage:    "The maximum gas price to use for transactions, in Wei",
 		Category: strings.ReplaceAll(strings.ToUpper(ModuleName), "_", " "),
-		Value:    10,
 	}
 	RegistrationOnlyFlag = &cli.BoolFlag{
 		Name:     ModuleName + "." + "registration-only",

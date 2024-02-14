@@ -1,15 +1,14 @@
 package config
 
 import (
-	"crypto/ecdsa"
 	"net/url"
 
 	"github.com/ethereum/go-ethereum/common"
+	k2common "github.com/restaking-cloud/native-delegation-for-plus/common"
 )
 
 type K2Config struct {
-	ValidatorWalletPrivateKey       *ecdsa.PrivateKey
-	ValidatorWalletAddress          common.Address
+	ValidatorWallets                []k2common.ValidatorWallet
 	Web3SignerUrl                   *url.URL
 	SignatureSwapperUrl             *url.URL
 	BeaconNodeUrl                   *url.URL
@@ -20,6 +19,7 @@ type K2Config struct {
 	BalanceVerificationUrl          *url.URL       // for effective balance reporting for verifiable signatures to claim rewards
 	PayoutRecipient                 common.Address // to override the payout recipient for all validators
 	ExclusionListFile               string         // to exclude validators from registration or native delegation
+	RepresentativeMappingFile       string         // to map representative addresses to fee recipients that may be varied among validators
 	MaxGasPrice                     uint64
 	RegistrationOnly                bool
 	ListenAddress                   *url.URL
@@ -27,8 +27,7 @@ type K2Config struct {
 }
 
 var K2ConfigDefaults = K2Config{
-	ValidatorWalletPrivateKey:       nil,
-	ValidatorWalletAddress:          common.Address{},
+	ValidatorWallets:                nil,
 	Web3SignerUrl:                   nil,
 	SignatureSwapperUrl:             nil,
 	BeaconNodeUrl:                   nil,
@@ -39,6 +38,7 @@ var K2ConfigDefaults = K2Config{
 	BalanceVerificationUrl:          nil,
 	PayoutRecipient:                 common.Address{},
 	ExclusionListFile:               "",
+	RepresentativeMappingFile:       "",
 	MaxGasPrice:                     0,
 	RegistrationOnly:                false,
 	ListenAddress:                   &url.URL{Scheme: "http", Host: "localhost:10000"},

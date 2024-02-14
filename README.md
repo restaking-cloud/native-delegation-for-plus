@@ -21,8 +21,7 @@ To follow a tutorial for the installation of the K2 native delegation module cli
 
 - Mainnet
 - Goerli
-
-Please note that currently only `Goerli` supports native delegation at this time. However, `Mainnet` supports native delegation `pre-registration` due to the proposer registry deployments already existing on mainnet.
+- Holesky
 
 PoN deployment information can be found here:
 
@@ -38,6 +37,8 @@ You can configure the K2 Native Delegation module using the following flags:
 
 - `k2.eth1-private-key`: The private key of the proposer(s) representative wallet. This key is essential for signing registration messages and interacting with all the smart contracts.
 NOTE: This key is the only wallet key that would be granted permission to manage validators on-chain and act as their representative. Keep this wallet safe.
+This module also supports the use of multiple representative wallets, in which case provide a comma separated list of private keys. [eg. `k2.eth1-private-key 1234567890abcdef1234567890abcdef12345f,1234567890abcdef1234567890abcdef12345f`
+]. The keys should be in order of priority, with the first key being the primary key. The module will use the first key to run contract calls and reward claim transactions. The additional keys are used to natively delegate or exit validators of varied payout recipients per key.
 
 - `k2.beacon-node-url`: The URL of the beacon node. This URL is required for syncing with the Ethereum Consensus Layer.
 
@@ -51,11 +52,21 @@ NOTE: This key is the only wallet key that would be granted permission to manage
 
 - `k2.payout-recipient`: The address of an alternative globally configured payout recipient. This address will be used for all validators if specified. If not specified, the payout recipient address configured on the node for each validator key will be used. To use this flag, the `k2.web3-signer-url` flag must also be specified in order to sign the registration messages with the alternative payout recipient address.
 
-- `k2.max-gas-price`: The maximum gas price to be used for on-chain transactions. This flag is optional and defaults to 10 Gwei if not specified. If in any registration, the gas price exceeds the maximum gas price, the registration/delegation will be skipped for that epoch.
+- `k2.max-gas-price`: The maximum gas price (denominated in WEI) to be used for on-chain transactions. This flag is optional and defaults to using the current netowrk gas price for execution. If set, any registration in which the gas price exceeds the maximum gas price, the registration/delegation will be skipped for that epoch.
 
 - `k2.listen-address`: The address on which the module will listen for incoming requests. This flag is optional and defaults to `localhost:10000` if not specified. The API specifications can be found [here](#api).
 
 - `k2.claim-threshold`: The threshold for claiming rewards from the K2 contract. This flag is optional and defaults to 0.0 KETH if not specified (claims any available rewards). If the rewards for a validator exceed the threshold, the rewards will be claimed from the K2 contract upon any request to the API.
+
+- `k2.k2-lending-contract-address`: The address of the K2 lending contract you wish to provide to override the default contract address for a supported network, or to provide a contract address for an unsupported network.
+
+- `k2.k2-node-operator-contract-address`: The address of the K2 node operator contract you wish to provide to override the default contract address for a supported network, or to provide a contract address for an unsupported network.
+
+- `k2.proposer-registry-contract-address`: The address of the proposer registry contract you wish to provide to override the default contract address for a supported network, or to provide a contract address for an unsupported network. Especially if in registration-only mode. If not in registration-only mode, the module will obtain the contract address from the K2 contracts. and does not need this flag.
+
+- `k2.signature-swapper-url`: The URL of the signature swapper service. This flag is optional and defaults to the network-specific signature swapper URL if not specified (overridden), or can be used to provide a custom signature swapper URL for unsupported networks. The signature swapper is used to generate and manage ECDSA signatures as proof of ownership of the BLS keys.
+
+- `k2.balance-verifier-url`: The URL of the balance verifier service. This flag is optional and defaults to the network-specific balance verifier URL if not specified (overridden), or can be used to provide a custom balance verifier URL for unsupported networks. The balance verifier is used to verify the effective balance of the proposer wallet for balance report to the contracts for reward claiming or exiting the protocol.
 
 - `k2.exclusion-list`: This flag is used to specify a list of validator public keys to exclude from either on-chain registration or native delegation. The flag accepts a filepath to a JSON file containing the list of validator public keys to exclude. The file is continuously monitored by the software and would pick up any changes immediately, allowing you to manage your registrations without restarting MEV Plus. The JSON file should be in the following format:
 
@@ -89,6 +100,31 @@ eg. `k2.exclusion-list ./exclusion-list.json`
 **NOTE**: The `excludedFromProposerRegistration` and `excludedFromNativeDelegation` fields are optional and default to `false` if not specified, either or both can be specified.
 If `excludedFromProposerRegistration` is set to `true`, the validator will not be registered on-chain in the Proposer Registry. And if this validator is intended to be natively delegated, and is not already in the Proposer Registry, the registration will fail, as native delegation requires registration in the Proposer Registry.
 
+- `k2.representative-mapping`: This flag is used to optionally specify a mapping of representative wallets that should be used to process validators to specific payout/feeRecipient addresses. The flag accepts a filepath to a JSON file containing the mapping of representative addresses designated to handle validators that pay to different k2 fee/payout recipients (any ECDSA address). The file is continuously monitored by the software and would pick up any changes immediately, allowing you to manage your registrations without restarting MEV Plus. The JSON file should be in the following format:
+
+```json
+[
+    {
+        "representativeAddress": string,
+        "feeRecipientAddress": string
+    }
+]
+
+```json
+[
+  {
+    "representativeAddress": "0x22A3864baaE65a9e8E5C163F80F850ADFe40Ed90",
+    "feeRecipientAddress": "0x22A3864baaE65a9e8E5C163F80F850ADFe40Ed90"
+  },
+  {
+    "representativeAddress": "0x83eef01c1dafda9ca1d4ec1e4d92ca8dac4131b7289c4b11e7024752ea66a5180462661b8b4a862b3aca970422377eb3",
+    "feeRecipientAddress": "0x4b7D8790bE2000cCCDBa4b8Ef4F2f76A5ccd1427"
+  }
+]
+```
+
+**NOTE**: Cannot provide more than one representative-feeRecipient pair with the same representative. Ensure that the representative addresses are the wallets available in the configured `k2.eth1-private-key` flag. This file is optional and is used to strictly inform the module to use the representative address to process the validators to the specified k2 fee/payout recipient address. If the representative address is not found in the `k2.eth1-private-key` flag, the module will not process the validators to the specified payout recipient address. If the node registration has a k2 fee/payout recipient not strictly specified in this file, the module would use the next available representative address in the `k2.eth1-private-key` flag to process the registration if possible.
+
 ## How It Works
 
 Validator Registration: The K2-Native-Delegation module enables node runners to register as validators on-chain by securely registering their BLS keys with the Proposer Registry contract. The module utilises the presigned messages broadcasted by the node through the Builder API of the consensus client to register validators on-chain.
@@ -109,7 +145,7 @@ Payout Management: Node runners can configure the payout recipient address. If n
 
 **Restaking Cloud Participation**: This module enables validators to participate in Restaking Cloud; k2 activities, potentially increasing their rewards in a secure and controlled manner.
 
-**Custom Payouts**: Validators can configure payout recipient addresses, giving them flexibility in managing their rewards, or use their set fee recipients on the node, to receive rewards through both block proposer rewards and rewards through restaking (exposure to multiple income streams to your configured node fee recipient).
+**Custom Payouts**: Validators can configure payout recipient addresses, giving them flexibility in managing their rewards, or use their set fee recipients on the node, to receive rewards through both block proposer rewards and k2 rewards through restaking (exposure to multiple income streams to your configured node fee recipient or any ECDSA address set for payouts), including but not limited to rewards for natively delegating validators.
 
 ## Installation
 

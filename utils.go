@@ -26,17 +26,26 @@ func (k2 *K2Service) parseConfig(moduleFlags common.ModuleFlags) (err error) {
 	for flagName, flagValue := range moduleFlags {
 		switch flagName {
 		case config.WalletPrivateKeyFlag.Name:
-			pk, err := crypto.HexToECDSA(strings.TrimPrefix(flagValue, "0x"))
-			if err != nil {
-				return fmt.Errorf("-%s: invalid wallet private private key %q", config.WalletPrivateKeyFlag.Name, flagValue)
+			privateKeyStrs := strings.Split(flagValue, ",")
+
+			for _, privateKeyStr := range privateKeyStrs {
+
+				if privateKeyStr == "" {
+					continue
+				}
+
+				pk, err := crypto.HexToECDSA(strings.TrimPrefix(privateKeyStr, "0x"))
+				if err != nil {
+					return fmt.Errorf("-%s: invalid wallet private private key %q", config.WalletPrivateKeyFlag.Name, privateKeyStr)
+				}
+				publicKey := pk.Public()
+				walletAddress := crypto.PubkeyToAddress(*publicKey.(*ecdsa.PublicKey))
+
+				k2.cfg.ValidatorWallets = append(k2.cfg.ValidatorWallets, k2common.ValidatorWallet{
+					PrivateKey: pk,
+					Address:    walletAddress,
+				})
 			}
-			k2.cfg.ValidatorWalletPrivateKey = pk
-
-			publicKey := pk.Public()
-
-			walletAddress := crypto.PubkeyToAddress(*publicKey.(*ecdsa.PublicKey))
-
-			k2.cfg.ValidatorWalletAddress = walletAddress
 
 		case config.Web3SignerUrlFlag.Name:
 			k2.cfg.Web3SignerUrl, err = k2common.CreateUrl(flagValue)
@@ -60,6 +69,8 @@ func (k2 *K2Service) parseConfig(moduleFlags common.ModuleFlags) (err error) {
 			}
 		case config.ExclusionListFlag.Name:
 			k2.cfg.ExclusionListFile = flagValue
+		case config.RepresentativeMappingFlag.Name:
+			k2.cfg.RepresentativeMappingFile = flagValue
 		case config.MaxGasPriceFlag.Name:
 			setMaxGasPrice, err := strconv.ParseUint(flagValue, 10, 64)
 			if err != nil {
@@ -156,8 +167,8 @@ func (k2 *K2Service) checkConfig() error {
 	}
 
 	// check that the wallet private key is set
-	if k2.cfg.ValidatorWalletPrivateKey == nil {
-		return fmt.Errorf("-%s: validator wallet private key is required", config.WalletPrivateKeyFlag.Name)
+	if len(k2.cfg.ValidatorWallets) == 0 {
+		return fmt.Errorf("-%s: a validator wallet private key is required", config.WalletPrivateKeyFlag.Name)
 	}
 
 	// check that the web3 signer url is set
@@ -168,6 +179,14 @@ func (k2 *K2Service) checkConfig() error {
 	// check if exclusion list file is set
 	if k2.cfg.ExclusionListFile != "" {
 		err := k2.readExclusionList(k2.cfg.ExclusionListFile)
+		if err != nil {
+			return err
+		}
+	}
+
+	// check if representative mapping file is set
+	if k2.cfg.RepresentativeMappingFile != "" {
+		err := k2.readRepresentativeMapping(k2.cfg.RepresentativeMappingFile)
 		if err != nil {
 			return err
 		}
@@ -225,24 +244,105 @@ func (k2 *K2Service) readExclusionList(filePath string) error {
 	return nil
 }
 
-func (k2 *K2Service) watchExclusionList(filePath string) error {
+func (k2 *K2Service) clearExclusionList() error {
+	k2.lock.Lock()
+	defer k2.lock.Unlock()
+	k2.exclusionList = make(map[string]k2common.ExcludedValidator)
+	return nil
+}
 
-	// Watch the exclusion list file for changes use the k2.done channel to stop the watcher
+func (k2 *K2Service) readRepresentativeMapping(filePath string) error {
+	// Read the representative mapping file
+	file, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to open representative mapping file: %w", err)
+	}
+	defer file.Close()
+	fileContent, err := io.ReadAll(file)
+	if err != nil {
+		return fmt.Errorf("failed to read representative mapping file: %w", err)
+	}
+
+	var representativeMappingList []k2common.CustomPayoutRepresentative
+	err = json.Unmarshal(fileContent, &representativeMappingList)
+	if err != nil {
+		return fmt.Errorf("failed to parse exclusion list file: %w", err)
+	}
+
+	preparedRepresentativeMapping := make(map[string]eth1Common.Address)
+	trackRepresentativeMapping := make(map[string]bool)
+
+	// Store the representative mapping
+	k2.lock.Lock()
+	defer k2.lock.Unlock()
+	for _, representativeMapping := range representativeMappingList {
+		if representativeMapping.RepresentativeAddress == (eth1Common.Address{}) {
+			return fmt.Errorf("invalid representative address %s in representative mapping", representativeMapping.RepresentativeAddress.String())
+		}
+
+		if representativeMapping.FeeRecipientAddress == (eth1Common.Address{}) {
+			return fmt.Errorf("invalid fee recipient address %s in representative mapping", representativeMapping.FeeRecipientAddress.String())
+		}
+
+		if _, ok := preparedRepresentativeMapping[representativeMapping.FeeRecipientAddress.String()]; ok {
+			return fmt.Errorf("duplicate fee recipient %s in representative mapping", representativeMapping.FeeRecipientAddress.String())
+		}
+
+		if _, ok := trackRepresentativeMapping[representativeMapping.RepresentativeAddress.String()]; ok {
+			return fmt.Errorf("duplicate representative %s in representative mapping", representativeMapping.RepresentativeAddress.String())
+		}
+
+		// check if representative address is in configured wallets
+		found := false
+		for _, wallet := range k2.cfg.ValidatorWallets {
+			if wallet.Address == representativeMapping.RepresentativeAddress {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("representative address %s in representative mapping is not a configured wallet", representativeMapping.RepresentativeAddress.String())
+		}
+
+		preparedRepresentativeMapping[representativeMapping.FeeRecipientAddress.String()] = representativeMapping.RepresentativeAddress
+		trackRepresentativeMapping[representativeMapping.RepresentativeAddress.String()] = true
+
+	}
+
+	k2.representativeMapping = preparedRepresentativeMapping
+
+	if len(k2.representativeMapping) > 0 {
+		k2.log.Infof("Representative mapping updated with %d representatives", len(k2.representativeMapping))
+	}
+
+	return nil
+}
+
+func (k2 *K2Service) clearRepresentativeMapping() error {
+	k2.lock.Lock()
+	defer k2.lock.Unlock()
+	k2.representativeMapping = make(map[string]eth1Common.Address)
+	return nil
+}
+
+func (k2 *K2Service) watchFile(label string, filePath string, readCallback func(string) error, clearCallback func() error) error {
+
+	// Watch the file for changes use the k2.done channel to stop the watcher
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		return fmt.Errorf("failed to create exclusion list file watcher: %w", err)
+		return fmt.Errorf("failed to create %s file watcher: %w", label, err)
 	}
 
 	// check if the file exists
 	_, err = os.Stat(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			k2.log.Infof("Exclusion list file %s does not exist, not watching", filePath)
+			k2.log.Infof("%s file %s does not exist, not watching", label, filePath)
 			watcher.Close()
-			return fmt.Errorf("exclusion list file does not exist")
+			return fmt.Errorf("%s file %s does not exist: %w", label, filePath, err)
 		}
 		watcher.Close()
-		return fmt.Errorf("failed to stat exclusion list file: %w", err)
+		return fmt.Errorf("failed to stat %s file %s: %w", label, filePath, err)
 	}
 
 	// get the parent directory of the file
@@ -251,7 +351,7 @@ func (k2 *K2Service) watchExclusionList(filePath string) error {
 	err = watcher.Add(fileDir)
 	if err != nil {
 		watcher.Close()
-		return fmt.Errorf("failed to add exclusion list file to watcher: %w", err)
+		return fmt.Errorf("failed to add %s file watcher: %w", label, err)
 	}
 
 	go func() {
@@ -260,13 +360,13 @@ func (k2 *K2Service) watchExclusionList(filePath string) error {
 			select {
 			case event, ok := <-watcher.Events:
 				if !ok {
-					k2.log.Debug("Exclusion list file watcher stopped")
+					k2.log.Debugf("%s file watcher stopped", label)
 					return
 				}
 				if (event.Op.Has(fsnotify.Write) || event.Op.Has(fsnotify.Create)) && event.Name == filePath {
-					err := k2.readExclusionList(filePath)
+					err := readCallback(filePath)
 					if err != nil {
-						k2.log.WithError(err).Warn("Failed to read exclusion list file, not updating exclusion list")
+						k2.log.WithError(err).Warnf("Failed to read %s with provided callback", label)
 					}
 				} else if (event.Op.Has(fsnotify.Remove) || event.Op.Has(fsnotify.Rename)) && event.Name == filePath {
 					// check if the file was removed
@@ -274,19 +374,20 @@ func (k2 *K2Service) watchExclusionList(filePath string) error {
 						// file still exists, not removing exclusion list
 						continue
 					}
-					k2.log.Infof("Exclusion list file %s was renamed/removed, clearing exclusion list", filePath)
-					k2.lock.Lock()
-					k2.exclusionList = make(map[string]k2common.ExcludedValidator)
-					k2.lock.Unlock()
+					k2.log.Infof("%s file %s was renamed/removed.", label, filePath)
+					err := clearCallback()
+					if err != nil {
+						k2.log.WithError(err).Warnf("Failed to clear %s with provided callback", label)
+					}
 				}
 			case err, ok := <-watcher.Errors:
 				if !ok {
-					k2.log.Debug("Exclusion list file watcher stopped")
+					k2.log.Debugf("%s file watcher stopped", label)
 					return
 				}
-				k2.log.WithError(err).Error("Failed to watch exclusion list file")
+				k2.log.WithError(err).Errorf("Error watching %s file", label)
 			case <-k2.exit:
-				k2.log.Debug("Stopping exclusion list file watcher")
+				k2.log.Debugf("Stopping %s file watcher", label)
 				return
 			}
 		}
