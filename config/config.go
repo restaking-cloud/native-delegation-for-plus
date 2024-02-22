@@ -8,6 +8,7 @@ import (
 )
 
 type K2Config struct {
+	LoggerLevel                     string
 	ValidatorWallets                []k2common.ValidatorWallet
 	Web3SignerUrl                   *url.URL
 	SignatureSwapperUrl             *url.URL
@@ -27,6 +28,7 @@ type K2Config struct {
 }
 
 var K2ConfigDefaults = K2Config{
+	LoggerLevel:                     "info",
 	ValidatorWallets:                nil,
 	Web3SignerUrl:                   nil,
 	SignatureSwapperUrl:             nil,

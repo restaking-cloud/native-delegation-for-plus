@@ -8,7 +8,7 @@ const (
 	SignPath = "/api/v1/eth2/sign/"
 	ListBLSPubKeysPath = "/api/v1/eth2/publicKeys"
 	ReloadSignerKeysPath = "/reload"
-	HealthCheckPath = "/healthcheck"
+	UpCheckPath = "/upcheck"
 
 
 	VALIDATOR_REGISTRATION_ACTION = "VALIDATOR_REGISTRATION"

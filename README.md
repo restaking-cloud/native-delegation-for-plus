@@ -5,7 +5,7 @@ Plus module for performing K2 native delegation registrations and restaking clou
 The K2 native delegation module for MEV Plus gives node runners the ability to automate their Proposer Registry and K2 validator native delegation registrations without the need for external parties or exposing validator keys outside of the node. Additionally their keys can easily be changed on their node as and when they wish and the module would facilitate this automatic registration without the need for extra steps or further action from the user.
 Exiting K2 and Rewards claiming can also be programmatically configured by the user, turning contract interactions for validators to simple and better managed calls through MEV Plus.
 
-# Tutorial
+## Tutorial
 
 To follow a tutorial for the installation of the K2 native delegation module click [here](https://docs.restaking.cloud/middleware/install-native-delegation).
 
@@ -62,7 +62,7 @@ This module also supports the use of multiple representative wallets, in which c
 
 - `k2.k2-node-operator-contract-address`: The address of the K2 node operator contract you wish to provide to override the default contract address for a supported network, or to provide a contract address for an unsupported network.
 
-- `k2.proposer-registry-contract-address`: The address of the proposer registry contract you wish to provide to override the default contract address for a supported network, or to provide a contract address for an unsupported network. Especially if in registration-only mode. If not in registration-only mode, the module will obtain the contract address from the K2 contracts. and does not need this flag.
+- `k2.proposer-registry-contract-address`: The address of the proposer registry contract you wish to provide to override the default contract address for a supported network, or to provide a contract address for an unsupported network. Especially if in registration-only mode. If not in registration-only mode, the module will obtain the contract address from the K2 contracts and does not need this flag.
 
 - `k2.signature-swapper-url`: The URL of the signature swapper service. This flag is optional and defaults to the network-specific signature swapper URL if not specified (overridden), or can be used to provide a custom signature swapper URL for unsupported networks. The signature swapper is used to generate and manage ECDSA signatures as proof of ownership of the BLS keys.
 
@@ -125,6 +125,8 @@ If `excludedFromProposerRegistration` is set to `true`, the validator will not b
 
 **NOTE**: Cannot provide more than one representative-feeRecipient pair with the same representative. Ensure that the representative addresses are the wallets available in the configured `k2.eth1-private-key` flag. This file is optional and is used to strictly inform the module to use the representative address to process the validators to the specified k2 fee/payout recipient address. If the representative address is not found in the `k2.eth1-private-key` flag, the module will not process the validators to the specified payout recipient address. If the node registration has a k2 fee/payout recipient not strictly specified in this file, the module would use the next available representative address in the `k2.eth1-private-key` flag to process the registration if possible.
 
+- `k2.logger-level`: The log level for the K2 Native Delegation module. This flag is optional and defaults to `info` if not specified. The available log levels are `debug`, `info`, `warn`, `error`, and `fatal`.
+
 ## How It Works
 
 Validator Registration: The K2-Native-Delegation module enables node runners to register as validators on-chain by securely registering their BLS keys with the Proposer Registry contract. The module utilises the presigned messages broadcasted by the node through the Builder API of the consensus client to register validators on-chain.
@@ -133,7 +135,6 @@ Signature Swapper: The module uses the signature swapper to generate and manage 
 
 Balance Verification: The module verifies the effective balance of the proposer wallet before registering validators on-chain. If the balance is insufficient (<32 ETH), the registration is skipped for that epoch. This verifiaction is also available as a remote designated verifier for each network that is used to balance report to the contracts for reward claiming or exiting the protocol.
 
-K2 Contract Interaction: The module communicates with the K2 contract on the blockchain to register validators and participate in restaking cloud activities. A requirement of K2 native delegation is registration with Proof of Neutrality single sign on proposer registry, which is also facilitated by this module.
 
 Payout Management: Node runners can configure the payout recipient address. If not specified, payouts go to the fee recipients configured in your consensus client for each validator key.
 

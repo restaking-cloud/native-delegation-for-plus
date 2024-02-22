@@ -13,6 +13,7 @@ import (
 
 	"github.com/attestantio/go-eth2-client/spec/phase0"
 	"github.com/fsnotify/fsnotify"
+	"github.com/sirupsen/logrus"
 
 	eth1Common "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -25,6 +26,13 @@ import (
 func (k2 *K2Service) parseConfig(moduleFlags common.ModuleFlags) (err error) {
 	for flagName, flagValue := range moduleFlags {
 		switch flagName {
+		case config.LoggerLevelFlag.Name:
+			logLevel, err := logrus.ParseLevel(flagValue)
+			if err != nil {
+				return err
+			}
+			k2.log.Logger.SetLevel(logLevel)
+			k2.cfg.LoggerLevel = flagValue
 		case config.WalletPrivateKeyFlag.Name:
 			privateKeyStrs := strings.Split(flagValue, ",")
 

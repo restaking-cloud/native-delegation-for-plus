@@ -26,6 +26,7 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 
 	// Default to using the primary representative address for the registrations
 	var representative k2common.ValidatorWallet = k2.cfg.ValidatorWallets[0]
+	var setPayoutRecipient common.Address = common.Address(payload[0].Message.FeeRecipient)
 	var nodeOperatorTopayoutRecipientMapping map[string]common.Address = make(map[string]common.Address)
 
 	var globalMaxNativeDelegation *big.Int = big.NewInt(0)
@@ -98,7 +99,10 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 			}
 
 			// if k2 operations then the right representative address to use for the registrations must be determined
-			payloadFeeRecipient := payload[0].Message.FeeRecipient // can do this safely as batch processing would have grouped by feeRecipient
+
+			// can do this safely as batch processing would have grouped by feeRecipient and this is our initial
+			// recipient until overwritten by the flag or by a fee recipient in the contracts
+			payloadFeeRecipient := setPayoutRecipient
 			var representativeFound bool
 			// check if there is a strict representative address for the payload's fee recipient
 			if useRepAddress, ok := k2.representativeMapping[payloadFeeRecipient.String()]; ok {
@@ -122,14 +126,60 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 					// If representative configured, check if the representative has been used in the k2 lending contract
 					// before, and if so is the fee recipient the same as the payload's fee recipient
 					payoutRecipient := nodeOperatorTopayoutRecipientMapping[representative.Address.String()]
-					if !strings.EqualFold(payoutRecipient.String(), payloadFeeRecipient.String()) {
+					if (payoutRecipient == common.Address{}) {
+						// then representative is potentially unused and can be used for this payload's fee recipient
+						// so use this representative address for the payload's fee recipient
 						k2.log.WithFields(logrus.Fields{
-							"payloadFeeRecipient":  payloadFeeRecipient.String(),
-							"representative":       representative.Address.String(),
-							"setK2PayoutRecipient": payoutRecipient.String(),
-						}).Error("strict representative address for payload's fee recipient does not match the set payout recipient in the contracts for this representative")
-						preChecksError.Store(fmt.Errorf("strict representative address (%s) for payload's fee recipient (%s) does not match the set payout recipient (%s) in the contracts for this representative", representative.Address.String(), payloadFeeRecipient.String(), payoutRecipient.String()))
-						return
+							"payloadFeeRecipient":           payloadFeeRecipient.String(),
+							"representative":                representative.Address.String(),
+							"representativePayoutRecipient": payoutRecipient.String(),
+						}).Debug("using strict representative address for payload's fee recipient as it is potentially unused")
+						if k2.cfg.Web3SignerUrl != nil && k2.cfg.PayoutRecipient != (common.Address{}) {
+							// if the k2 web3signer has been set and a payout recipient has been set,
+							// then use that as the global payout recipient to overwrite the payload's fee recipient
+							payloadFeeRecipient = k2.cfg.PayoutRecipient
+							k2.log.WithField("payoutRecipient", payloadFeeRecipient.String()).Debug("using the payout recipient set in the configuration to overwrite the payload's fee recipient for K2")
+						}
+
+					} else if !strings.EqualFold(payoutRecipient.String(), payloadFeeRecipient.String()) {
+						// wallet is used if here, and payout recipient in the k2 lending contracts for this wallet is not the same as the payload's fee recipient
+
+						// the wallet fee recipient on-chain does not match the payload
+						// if the k2 web3signer has been set and a payout recipient has been set,
+						// check if this matches the payout recipient in the k2 lending contracts
+						if k2.cfg.Web3SignerUrl != nil && k2.cfg.PayoutRecipient != (common.Address{}) && strings.EqualFold(payoutRecipient.String(), k2.cfg.PayoutRecipient.String()) {
+							// if the global payout recipient has been set in the configuration
+							// and it matches the payout recipient in the k2 lending contracts for this
+							// strict use representative address then use the payout recipient set in the configuration
+							// to overwrite the payload's fee recipient for K2, as this is the same as the payout recipient in the contracts
+							// and the module has a web3signer set to make the change to the payload
+							payloadFeeRecipient = k2.cfg.PayoutRecipient
+							k2.log.WithField("payoutRecipient", payloadFeeRecipient.String()).Debug("using the payout recipient set in the configuration (same as payout for rep in contracts) to overwrite the payload's fee recipient for K2")
+						} else if k2.cfg.Web3SignerUrl != nil && k2.cfg.PayoutRecipient != (common.Address{}) && !strings.EqualFold(payoutRecipient.String(), k2.cfg.PayoutRecipient.String()) {
+							// if the payout recipient in the k2 lending contracts for this strict representative address
+							// does not match the global payout recipient set in the configuration
+							// then since the module is configured with a web3signer, substitute the payload's payout recipient with that set
+							// in the contracts for this representative address
+							// as we cannot change this again for this registration since its set in the contracts already for this wallet
+							initialPayloadFeeRecipient := payloadFeeRecipient
+							payloadFeeRecipient = payoutRecipient
+							k2.log.WithFields(logrus.Fields{
+								"intialPayloadFeeRecipient": initialPayloadFeeRecipient.String(),
+								"payloadFeeRecipient":       payloadFeeRecipient.String(),
+								"representative":            representative.Address.String(),
+							}).Debug("using the payout recipient set in the k2 contract to overwrite the payload's fee recipient for K2")
+						} else {
+							// no web3signer set, and the payout recipient in the k2 lending contracts for this wallet
+							// does not match the payload's fee recipient so throw an error, since we cannot modify the payload anyway
+							// and cannot proceed with the registration either
+							k2.log.WithFields(logrus.Fields{
+								"payloadFeeRecipient":  payloadFeeRecipient.String(),
+								"representative":       representative.Address.String(),
+								"setK2PayoutRecipient": payoutRecipient.String(),
+							}).Error("strict representative address set for payload's fee recipient does not match the set payout recipient in the contracts for this wallet")
+							preChecksError.Store(fmt.Errorf("strict representative address (%s) for payload's fee recipient (%s) does not match the set payout recipient (%s) in the contracts for this representative", representative.Address.String(), payloadFeeRecipient.String(), payoutRecipient.String()))
+							return
+						}
 					}
 
 				}
@@ -142,33 +192,63 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 				var unusedRepresentative k2common.ValidatorWallet = k2common.ValidatorWallet{
 					Address: common.Address{},
 				} // holds the next available unused representative address configured
+				var firstUsedRepresentative k2common.ValidatorWallet = k2.cfg.ValidatorWallets[0] // holds the first used representative address configured
+
 				for _, wallet := range k2.cfg.ValidatorWallets { // Check wallets in order of priority set in the configuration
 					payoutRecipient := nodeOperatorTopayoutRecipientMapping[wallet.Address.String()]
 					if strings.EqualFold(payoutRecipient.String(), payloadFeeRecipient.String()) {
-						representative = wallet // representative found for the set feeRecipient continue further native delegation using this representative as payload fee recipients match
+						representative = wallet // representative found for the set feeRecipient continue further native delegation using this representative as the payload fee recipient matches
 						representativeFound = true
 						break
 					} else if (payoutRecipient == common.Address{}) && (unusedRepresentative.Address == common.Address{}) {
-						// representative not found for the feeRecipient check if the wallet has not been used and is available
-						// if a fresh native delegation for these validators with this feeRecipient is needed
+						// representative not found for the feeRecipient check if the wallet means its potentially unused
 						unusedRepresentative = wallet
 					}
 				}
 				if !representativeFound {
 					// Representative not found in contract for this payload's payout recipient
 					// check if there is an avaialable representative that has not been used
-					if unusedRepresentative.Address == (common.Address{}) {
+					if unusedRepresentative.Address == (common.Address{}) { // there was no unused wallet
 						// no representative available for this payload's payout recipient
 						// as all wallets configured have a payout recipient in the k2 lending contracts that do not match the payload's fee recipient thus
 						// these validators cannot be registered under this node operator's representative address as they do not pay to the specified payout recipient
-						k2.log.WithField("payloadFeeRecipient", payloadFeeRecipient.String()).Error("no representative available for this payload's payout recipient. Add another wallet to your config")
-						preChecksError.Store(fmt.Errorf("no configured representative available for this payload's fee recipient [%s]; add another wallet to your config", payloadFeeRecipient.String()))
-						return
+
+						// however check if the module is configured for web3signer operations and a payout recipient has been set
+						if k2.cfg.Web3SignerUrl != nil {
+							// if the k2 web3signer has been set
+							// then can used the first priority wallet as the representative address as all configured wallets have a payout recipient in the k2 lending contracts
+
+							representative = firstUsedRepresentative
+							k2.log.WithField("representative", representative.Address.String()).Debug("using the first priority wallet as the representative address as all configured wallets have a payout recipient in the k2 lending contracts that do not match the payload's fee recipient")
+
+							// since the wallet has already been used we cannot use the global payout recipient to overwrite the payload's fee recipient and would need to use the existing payout recipient for this representative
+							payloadFeeRecipient = nodeOperatorTopayoutRecipientMapping[representative.Address.String()]
+							k2.log.WithField("payoutRecipient", payloadFeeRecipient.String()).Debug("using the payout recipient set in the k2 contract to overwrite the payload's fee recipient for K2")
+
+						} else {
+							// if the module is not configured for web3signer operations then throw an error as nothing can be done as all wallets are used
+							k2.log.WithField("payloadFeeRecipient", payloadFeeRecipient.String()).Error("no representative available for this payload's payout recipient. Add another wallet to your config")
+							preChecksError.Store(fmt.Errorf("no configured representative available for this payload's fee recipient [%s]; add another wallet to your config", payloadFeeRecipient.String()))
+							return
+						}
+					} else {
+						// use the next available representative address that has not been used
+						representative = unusedRepresentative
+
+						// if a global payout recipient has been set in the configuration and it doesnt match the
+						// payout recipient overwrite the payload's fee recipient and use the set global payout recipient
+						// for this unused representative address
+						if k2.cfg.Web3SignerUrl != nil && k2.cfg.PayoutRecipient != (common.Address{}) {
+							payloadFeeRecipient = k2.cfg.PayoutRecipient
+							k2.log.WithField("payoutRecipient", payloadFeeRecipient.String()).Debug("using the payout recipient set in the configuration to overwrite the payload's fee recipient for K2")
+						}
 					}
-					// use the next available representative address that has not been used
-					representative = unusedRepresentative
 				}
 			}
+
+			// re-assign the payout recipient if it has been changed
+			// from the seletion of the representative address and payout recipient
+			setPayoutRecipient = payloadFeeRecipient
 
 			if globalMaxNativeDelegation != nil && currentGlobalNativeDelegation != nil && globalMaxNativeDelegation.Cmp(currentGlobalNativeDelegation) <= 0 {
 				// global max native delegation has been reached
@@ -238,6 +318,9 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 		} else {
 			// If the module is configured for Proposer Registry operations only
 			// then no need to check the global max native delegation
+
+			// TODO: ROnny
+
 			preChecksComplete.Store(true)
 			k2.log.Debug("module is configured for Proposer Registry operations only, K2 capacity and represenative checks not required")
 		}
@@ -261,7 +344,7 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 	var alreadyRegisteredMap = make(map[string]k2common.K2ValidatorRegistration)
 
 	for validator, registered := range proposerRegistryResults {
-		if registered.Status == 0 {
+		if registered.Status == 0 { // not registered
 			if excludedValidator, ok := k2.exclusionList[validator]; ok {
 				if excludedValidator.ExcludedFromProposerRegistration {
 					k2.log.WithField("validatorPubKey", validator).Debug("validator is excluded from Proposer Registry registration")
@@ -273,11 +356,11 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 			alreadyRegisteredMap[validator] = k2common.K2ValidatorRegistration{
 				RepresentativeAddress:   registered.Representative,
 				ProposerRegistrySuccess: true,
-				SignedValidatorRegistration: &apiv1.SignedValidatorRegistration{
+				SignedValidatorRegistration: &apiv1.SignedValidatorRegistration{ // structure modified here from that of the payload
 					Message: &apiv1.ValidatorRegistration{
 						Pubkey:       payloadMap[validator].Message.Pubkey,
 						GasLimit:     payloadMap[validator].Message.GasLimit,
-						FeeRecipient: bellatrix.ExecutionAddress(common.HexToAddress(registered.PayoutRecipient.String())),
+						FeeRecipient: bellatrix.ExecutionAddress(registered.PayoutRecipient),
 						Timestamp:    payloadMap[validator].Message.Timestamp,
 					},
 					Signature: payloadMap[validator].Signature,
@@ -287,8 +370,25 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 	}
 	proposerRegistryAlreadyRegisteredCount := uint64(len(alreadyRegisteredMap))
 
+	waitLogged := false
+	for !preChecksComplete.Load() && preChecksError.Load() == nil {
+		if !waitLogged {
+			k2.log.Debug("waiting for pre checks to complete")
+			waitLogged = true
+		}
+	}
+
+	// if there is an error in the prechecks then return the error
+	if preChecksError.Load() != nil {
+		return nil, preChecksError.Load().(error)
+	}
+
+	///////////////////////////////////////////////////////////////
+	// PRECHECKS, WALLET AND PAYOUT RECIPIENT SELECTION COMPLETED//
+	///////////////////////////////////////////////////////////////
+
 	// prepare registrations from the registrationsToProcess for the proposer registry
-	processValidators, err := k2.prepareRegistrations(registrationsToProcess, representative.Address)
+	processValidators, err := k2.prepareRegistrations(registrationsToProcess, representative.Address, setPayoutRecipient)
 	if err != nil {
 		return nil, err
 	}
@@ -303,22 +403,18 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 		k2RegistrationResults, err := k2.eth1.BatchK2CheckRegisteredValidators(validators)
 		if err != nil {
 			k2.log.WithError(err).Error("failed to check if validators are already registered")
-			return nil, err
+			return nil, fmt.Errorf("failed to check if validators are already registered: %v", err)
 		}
 
-		if len(k2RegistrationResults) > 0 {
-			// Wait for the global and individual native delegation checks to complete or for there to be an error
-			for !preChecksComplete.Load() && preChecksError.Load() == nil {
-				k2.log.Debug("waiting for global and individual native delegation checks to complete")
+		var preprareK2OnlyRegistrationsToProcess map[string]apiv1.SignedValidatorRegistration = make(map[string]apiv1.SignedValidatorRegistration)
+		var signablePubKeys map[string]bool = make(map[string]bool)
+		if k2.cfg.Web3SignerUrl != nil {
+			signablePubKeys, err = k2.web3Signer.GetPubkeyList()
+			if err != nil {
+				k2.log.WithError(err).Error("failed to get signable pubkeys")
+				return nil, fmt.Errorf("failed to get signable pubkeys: %v", err)
 			}
 		}
-
-		// if there is an error in the capacity checks then return the error
-		if preChecksError.Load() != nil {
-			return nil, preChecksError.Load().(error)
-		}
-
-		var k2OnlyRegistrationsToProcess []apiv1.SignedValidatorRegistration
 
 		// prepare K2 only registrations
 		for validator, registered := range k2RegistrationResults {
@@ -334,10 +430,31 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 								k2.log.WithField("validatorPubKey", validator).Errorf("validator is not registered in the Proposer Registry and is not being handled by the registrationToProcess")
 							}
 						} else {
-							k2.log.WithField("validatorPubKey", validator).Errorf("validator is not registered in the Proposer Registry and is not being handled by the registrationToProcess")
+							if (!strings.EqualFold(setPayoutRecipient.String(), payload[0].Message.FeeRecipient.String()) && setPayoutRecipient != common.Address{} && k2.cfg.Web3SignerUrl != nil) {
+								// if the payout recipient has been set and is different from the one in the payload
+								// means there was a change in the payout recipient and required the payload to be signed again
+								// so the validator was not in configurable with the web3signer for the new registeration message
+								// to be signed, thus skip this validator as unsupported
+								k2.log.WithFields(logrus.Fields{
+									"validatorPubKey":           validator,
+									"configuredPayoutRecipient": setPayoutRecipient.String(),
+									"payloadPayoutRecipient":    payload[0].Message.FeeRecipient.String(),
+								}).Debug("validator is not registered in the Proposer Registry and the payout recipient has changed between the registration message and the selected payout address")
+								k2.log.WithFields(logrus.Fields{
+									"validatorPubKey": validator,
+								}).Debug("could not sign the registration message for the validator for the new payout recipient")
+							} else {
+								k2.log.WithField("validatorPubKey", validator).Errorf("validator is not registered in the Proposer Registry and is not being handled by the registrationToProcess")
+							}
 						}
+
+						continue // continue to the next validator as even the proposer registry is not processing this validator thus it is unsupported
+					} else {
+						// this is a validator that is not registered in the K2 contract
+						// but is being handled by the registrationToProcess
+						continue // so continue to the next validator as it is being handled by the Proposer Registry and would also then be natively delegated
 					}
-					continue
+
 				} else {
 					// this is a validator that is already registered in the Proposer Registry, but not in the K2 contract
 					// so it would NOT be in the registrations mapping from the proposerRegistry registrations to process
@@ -351,9 +468,10 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 						}
 					}
 
-					// check if the representative address is the same as the one configured
+					// check if the representative address from the proposrRegistry for this validator is the same as the one selected
 					if registration.RepresentativeAddress != representative.Address {
-						// representative address is not the same as the one configured for the module
+						// representative address from proposerRegistry for validator is not the
+						// same as the one being used to process the registration
 						// so cannot take action on this validator
 						k2.log.WithFields(
 							logrus.Fields{
@@ -365,25 +483,10 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 						continue
 					}
 
-					// check if the the fee recipient from the node matches that from the contract for
-					// that validator's registration message else the signature will not be valid
-					if !strings.EqualFold(registration.SignedValidatorRegistration.Message.FeeRecipient.String(), payloadMap[validator].Message.FeeRecipient.String()) {
-						// fee recipient has changed between the registration message and the contract
-						// so cannot take action on this validator, as the node's signature will not be valid
-						// having signed a payload that has a different fee recipient from what the contract has
-						k2.log.WithFields(logrus.Fields{
-							"validatorPubKey": validator,
-							"registryPayout":  registration.SignedValidatorRegistration.Message.FeeRecipient.String(),
-							"nodePayout":      payloadMap[validator].Message.FeeRecipient.String(),
-						}).Debugf("validator is already registered in the Proposer Registry, but the fee recipient has changed between the registration message and the contract")
-						k2UnsuppportedCount++
-						continue
-					}
-
 					// representative address is the same as the one configured so can take action on this validator
 
 					// They are in the already registered map which has the proposer registry success set to true,
-					// has the signed validator registration payload with the fee recipient the payout recipient registered in the
+					// has the signed validator registration payload with the payout recipient from the proposer registry contract,
 					// proposer registry contract, and the representative address already set.
 					// the only field not set is the ecdsa sig for this already registered validator that would be needed
 					// for further k2 native delegation
@@ -414,22 +517,91 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 						}
 					}
 
-					k2OnlyRegistrationsToProcess = append(k2OnlyRegistrationsToProcess, *registration.SignedValidatorRegistration)
-					// this would be used to generate the signatures for these validators as they wont have signatures in the processValidators mapping yet
+					// Once here, means we can natively delegate this validator from the already registered map for Proposer Registry
 
-					// Add this validator to the processValidators mapping as it would be used for native delegtion
-					processValidators[registration.SignedValidatorRegistration.Message.Pubkey.String()] = registration
+					// since the already registered map of proposer registry is modified (from the contract and not the actual current payload), thus the
+					// signedValidatorRegistration object is modified, try and find a current valid payload for this validator
+					// and add it to the registrations to process for K2 only native delegation
+					if validPayload, ok := payloadMap[validator]; ok {
 
-					// increase the current global and individual native delegation
-					currentGlobalNativeDelegation.Add(currentGlobalNativeDelegation, big.NewInt(1))
-					currentIndividualNativeDelegation.Add(currentIndividualNativeDelegation, big.NewInt(1))
+						modifiedPayload := apiv1.SignedValidatorRegistration{
+							Message: &apiv1.ValidatorRegistration{
+								Pubkey:   validPayload.Message.Pubkey,
+								GasLimit: validPayload.Message.GasLimit,
+								// if the setPayoutRecipient has been changed from the payload then use that as it means
+								// the payload can be signed for the new payout recipient, however if it is the same,
+								// no re signing is required as the payload is already signed for the selected payout recipient
+								FeeRecipient: bellatrix.ExecutionAddress(setPayoutRecipient), // only field potentially changed from the payload
+								Timestamp:    validPayload.Message.Timestamp,
+							},
+							Signature: validPayload.Signature,
+						}
+
+						// check if the setPayoutRecipient has been changed from the payload then check if there is a web3signer to facilitate the change
+						if !strings.EqualFold(setPayoutRecipient.String(), validPayload.Message.FeeRecipient.String()) {
+							if k2.cfg.Web3SignerUrl == nil {
+								// if the payout recipient has been set and is different from the one in the payload
+								// means there was a change in the payout recipient and required the payload to be signed again
+								// so the validator was not in configurable with the web3signer for the new registeration message
+								// to be signed, thus skip this validator as unsupported
+								k2.log.WithFields(logrus.Fields{
+									"validatorPubKey":         validator,
+									"selectedPayoutRecipient": setPayoutRecipient.String(),
+									"payloadPayoutRecipient":  validPayload.Message.FeeRecipient.String(),
+								}).Debug("validator is already registered in the Proposer Registry and the payout recipient has changed between the registration message and the selected payout address")
+								k2.log.WithFields(logrus.Fields{
+									"validatorPubKey": validator,
+								}).Debug("could not sign the registration message for the validator for the new payout recipient")
+								k2UnsuppportedCount++
+								continue
+							}
+
+							// then we need to re-sign the payload for the new payout recipient
+							// as this was not done by the preprareRegistrations function, since we did not preprare
+							// registrations for alreadyRegisteredMap as they are already registered in the Proposer Registry
+							if _, ok := signablePubKeys[validator]; !ok {
+								// if the validator is not in the signable pubkeys list then it cannot be signed
+								// for the new payout recipient
+								k2.log.WithFields(logrus.Fields{
+									"validatorPubKey":         validator,
+									"selectedPayoutRecipient": setPayoutRecipient.String(),
+									"payloadPayoutRecipient":  validPayload.Message.FeeRecipient.String(),
+								}).Debug("validator is already registered in the Proposer Registry and the payout recipient has changed between the registration message and the selected payout address")
+								k2.log.WithFields(logrus.Fields{
+									"validatorPubKey": validator,
+								}).Debug("could not sign the registration message for the validator for the new payout recipient")
+								k2UnsuppportedCount++
+								continue
+							} else {
+								// add here to [re-sign AND then generate ECDSA signature] for the new payload to process for k2 only native delegation
+								preprareK2OnlyRegistrationsToProcess[validator] = modifiedPayload
+
+								// increase the current global and individual native delegation
+								currentGlobalNativeDelegation.Add(currentGlobalNativeDelegation, big.NewInt(1))
+								currentIndividualNativeDelegation.Add(currentIndividualNativeDelegation, big.NewInt(1))
+							}
+						} else {
+							// add here to [generate the ECDSA signature] for the new payload to process for k2 only native delegation
+							preprareK2OnlyRegistrationsToProcess[validator] = modifiedPayload
+
+							// increase the current global and individual native delegation
+							currentGlobalNativeDelegation.Add(currentGlobalNativeDelegation, big.NewInt(1))
+							currentIndividualNativeDelegation.Add(currentIndividualNativeDelegation, big.NewInt(1))
+						}
+
+					} else {
+						k2.log.WithField("validatorPubKey", validator).Error("validator is already registered in the Proposer Registry, but the payload for this validator is not found")
+						k2UnsuppportedCount++
+					}
 				}
 
 			} else {
 				// this is a validator that is already registered in the K2 contract meaning it is already registered in the Proposer Registry as well
 				// just add to the already registered map with the K2Success flag set to true so that this can be skipped since exists
 				// this is just necessary to log and return the results
-				if _, ok := alreadyRegisteredMap[validator]; !ok {
+				if knownRegistration, ok := alreadyRegisteredMap[validator]; !ok {
+					// if the validator is not in the already registered map then add it
+					// this should not happen as the validator should be in the already registered map
 					alreadyRegisteredMap[validator] = k2common.K2ValidatorRegistration{
 						RepresentativeAddress:   common.HexToAddress(registered),
 						ProposerRegistrySuccess: true,
@@ -437,16 +609,20 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 						SignedValidatorRegistration: &apiv1.SignedValidatorRegistration{
 							Message: &apiv1.ValidatorRegistration{
 								Pubkey:       payloadMap[validator].Message.Pubkey,
-								GasLimit:     payloadMap[validator].Message.GasLimit, // ** this may have changed from the gas limit signed as of the previous time of registration
-								FeeRecipient: bellatrix.ExecutionAddress(common.HexToAddress(registered)),
-								Timestamp:    payloadMap[validator].Message.Timestamp, // ** this is the timestamp of the payload, but not the time stamp of the actual payload that was signed as of previous time of registration
+								GasLimit:     payloadMap[validator].Message.GasLimit,         // ** this may have changed from the gas limit signed as of the previous time of registration
+								FeeRecipient: bellatrix.ExecutionAddress(setPayoutRecipient), // may be different from the payload and from what is actually registered in the contracts
+								// but safe to assume since this is valid for the current representative address and has already been registered then the deduced payout recipient is valid
+								// as it would be a payout recipient of the representative address from the contracts of the already used representative address
+								Timestamp: payloadMap[validator].Message.Timestamp, // ** this is the timestamp of the payload, but not the time stamp of the actual payload that was signed as of previous time of registration
 							},
 							Signature: payloadMap[validator].Signature,
 						},
-					}
+					} // the above payload is not the actual payload that was signed as of the previous time of registration this is just to log and return the results
+					// important fields are the ProposerRegistrySuccess, K2Success, RepresentativeAddress, and PubKey fields
 					// fields marked ** are not obtainable from the contracts as such would use the current payload fields in returning the result for logging/output
 				} else {
-					r := alreadyRegisteredMap[validator]
+					// if the validator is in the already registered map then update the K2Success flag
+					r := knownRegistration
 					r.K2Success = true
 					alreadyRegisteredMap[validator] = r
 				}
@@ -455,25 +631,36 @@ func (k2 *K2Service) processValidatorRegistrations(payload []apiv1.SignedValidat
 			}
 		}
 
-		// Generate the ECDSA Signatures for the validators who are to perform K2 Only native delegation as these would not have been generated by
-		// the previous Proposer Only Registration Preparations. If the validator is not in the alreadyREgistered mapping and is in the registrations to
-		// process then it would already have an ECDSA Signature from the signature swapper that it woul use for both registration and native delegation
+		if len(preprareK2OnlyRegistrationsToProcess) > 0 {
+			// Generate the ECDSA Signatures for the validators who are to perform K2 Only native delegation as these would not have been generated by
+			// the previous Proposer Only Registration Preparations. If the validator is not in the alreadyREgistered mapping and is in the registrations to
+			// process then it would already have an ECDSA Signature from the signature swapper that it woul use for both registration and native delegation
 
-		// Generate the signatures for the K2-only native delegations that were just added to the mapping
-		ecdsaSignatures, err := k2.signatureSwapper.BatchGenerateSignature(k2OnlyRegistrationsToProcess, representative.Address)
-		if err != nil {
-			k2.log.WithError(err).Error("failed to generate signatures from signature swapper for native delegation")
-			return nil, err
-		}
+			// Generate the signatures for the K2-only native delegations that were just added to the mapping
+			processK2Validators, err := k2.prepareRegistrations(preprareK2OnlyRegistrationsToProcess, representative.Address, setPayoutRecipient)
+			if err != nil {
+				return nil, err
+			}
 
-		for validatorPubKey, ecdsaSig := range ecdsaSignatures {
-			r := processValidators[validatorPubKey.String()]
-			r.ECDSASignature = ecdsaSig
-			processValidators[validatorPubKey.String()] = r
+			for validatorPubKey, reg := range processK2Validators {
+				// Once the registrations have been re-signed for amodified payout if thats the case
+				// and also ecdsa signatures have been generated for the new payload for k2 only native delegation
+				// then add these to the processValidators mapping for final processing
+				r := reg
+				r.ProposerRegistrySuccess = true
+				processValidators[validatorPubKey] = r // safe to do this as it wont overwrite any existing in the map
+				// since the validator if was in the registrations to process would not havve been in the alreadyRegisteredMap and thus not have been in the
+				// prepareK2OnlyRegistrationsToProcess mapping
+			}
 		}
 
 	}
 
+	///////////////////////////
+	// PREPARATION COMPLETE //
+	///////////////////////////
+
+	// Final processing of the registrations to the contract executions
 	var proposerRegistrations []k2common.K2ValidatorRegistration
 	var k2Registrations []k2common.K2ValidatorRegistration
 
@@ -891,9 +1078,16 @@ func (k2 *K2Service) batchProcessValidatorRegistrations(payload []apiv1.SignedVa
 	return results, nil
 }
 
-func (k2 *K2Service) prepareRegistrations(toProcess map[string]apiv1.SignedValidatorRegistration, representative common.Address) (map[string]k2common.K2ValidatorRegistration, error) {
+func (k2 *K2Service) prepareRegistrations(toProcess map[string]apiv1.SignedValidatorRegistration, representative common.Address, payoutRecipient common.Address) (map[string]k2common.K2ValidatorRegistration, error) {
+
+	var registrations map[string]k2common.K2ValidatorRegistration = make(map[string]k2common.K2ValidatorRegistration)
+	if len(toProcess) == 0 {
+		return registrations, nil
+	}
+
 	// Retrieve the signable pubkeys from the web3signer on runtime since these can change whenever the node runner wishes
 	// only if web3signer is configured
+
 	var signablePubKeys map[string]bool = make(map[string]bool)
 	var err error
 	if k2.cfg.Web3SignerUrl != nil {
@@ -903,69 +1097,67 @@ func (k2 *K2Service) prepareRegistrations(toProcess map[string]apiv1.SignedValid
 			return nil, err
 		}
 	}
-
-	var registrations map[string]k2common.K2ValidatorRegistration = make(map[string]k2common.K2ValidatorRegistration)
-
-	if len(toProcess) == 0 {
-		return registrations, nil
+	if payoutRecipient != (common.Address{}) {
+		// extract the payout recipient from the payload and check if it is different from the selected payout recipient
+		var toProcessFeeRecipient common.Address
+		for _, registration := range toProcess {
+			toProcessFeeRecipient = common.HexToAddress(registration.Message.FeeRecipient.String())
+			break
+		}
+		if k2.cfg.Web3SignerUrl == nil && !strings.EqualFold(payoutRecipient.String(), toProcessFeeRecipient.String()) {
+			// this idealy should not happen as it only would be different from the payload if there is a web3 signer configured; checked through the previous steps
+			k2.log.WithField("payoutRecipient", payoutRecipient.String()).Error("Payout recipient is set but web3 signer is not configured to sign with a different payout recipient")
+			return nil, fmt.Errorf("payout recipient is set but web3 signer is not configured to sign with a different payout recipient")
+		}
 	}
 
 	var signedRegistrations []apiv1.SignedValidatorRegistration
 
 	// prepare Proposer Registry registrations
 	for validator, registration := range toProcess {
-		var PayoutRecipient bellatrix.ExecutionAddress
-		var signedRegistration apiv1.SignedValidatorRegistration
+		var signedRegistration apiv1.SignedValidatorRegistration = registration
 
-		if k2.cfg.PayoutRecipient != (common.Address{}) && common.HexToAddress(registration.Message.FeeRecipient.String()) != k2.cfg.PayoutRecipient {
-			// if a custom the payout recipient is configured, different from the payload
+		if payoutRecipient != (common.Address{}) && !strings.EqualFold(payoutRecipient.String(), registration.Message.FeeRecipient.String()) {
+			// if a custom payout recipient selected, different from the payload
 			// check if the validator is in the signable keys list
 			// to allow for the signing of a new registration with changed payout recipient
 			if _, ok := signablePubKeys[validator]; !ok {
 				// validator is not in the signable list so cannot generate a new signature
-				// then maintain the original payout recipient
-				PayoutRecipient = registration.Message.FeeRecipient
+				// then maintain the original payout recipient and make this registration unsupportable
 				k2.log.WithFields(logrus.Fields{
-					"validatorPubKey": validator,
-					"payoutRecipient": registration.Message.FeeRecipient.String(),
-				}).Debug("validator is not in the signable list so cannot generate a new signature")
+					"validatorPubKey":         validator,
+					"payloadPayoutRecipient":  registration.Message.FeeRecipient.String(),
+					"selectedPayoutRecipient": payoutRecipient.String(),
+				}).Error("validator is not in the signable list so cannot generate a new signature, skipping validator")
+				continue
 			} else {
 				// validator is in the signable list so can generate a new signature
 				// then use the custom payout recipient
-				PayoutRecipient = bellatrix.ExecutionAddress(k2.cfg.PayoutRecipient)
 				k2.log.WithFields(logrus.Fields{
-					"validatorPubKey": validator,
-					"payoutRecipient": k2.cfg.PayoutRecipient.String(),
+					"validatorPubKey":         validator,
+					"payloadPayoutRecipient":  registration.Message.FeeRecipient.String(),
+					"selectedPayoutRecipient": payoutRecipient.String(),
 				}).Debug("validator is in the signable list so can generate a new signature")
-			}
-		} else { // if a custom the payout recipient is not configured or is the same as the payload
-			PayoutRecipient = registration.Message.FeeRecipient
-		}
 
-		if k2.cfg.Web3SignerUrl != nil &&
-			common.HexToAddress(registration.Message.FeeRecipient.String()) != k2.cfg.PayoutRecipient &&
-			k2.cfg.PayoutRecipient != (common.Address{}) &&
-			PayoutRecipient != registration.Message.FeeRecipient {
-			// if a custom the payout recipient is configured, different from the payload
-			// and a web3 signer is configured, sign the registration with the custom payout recipient
+				if k2.cfg.Web3SignerUrl != nil {
+					// if a custom the payout recipient is configured, different from the payload
+					// and a web3 signer is configured, sign the registration with the custom payout recipient
 
-			// this condition would only be hit if the signable key check passed and the payout recipint has been
-			// set different from the payload through the preceeding step
-			signedRegistration, err = k2.web3Signer.SignRegistration(
-				PayoutRecipient,
-				registration.Message.GasLimit,
-				registration.Message.Pubkey,
-				registration.Message.Timestamp,
-			)
-			if err != nil {
-				k2.log.WithField("validatorPubKey", validator).WithError(err).Error("failed to sign registration for validator")
-				continue
+					// this condition would only be hit if the signable key check passed and the payout recipint has been
+					// set different from the payload through the preceeding steps
+					signedRegistration, err = k2.web3Signer.SignRegistration(
+						bellatrix.ExecutionAddress(payoutRecipient),
+						registration.Message.GasLimit,
+						registration.Message.Pubkey,
+						registration.Message.Timestamp,
+					)
+					if err != nil {
+						k2.log.WithError(err).Error("failed to sign registration with custom payout recipient")
+						return nil, fmt.Errorf("failed to sign registration with custom payout recipient: %w", err)
+					}
+				}
 			}
-		} else {
-			// if a custom the payout recipient is not configured or is the same as the payload or the web3 signer is not configured
-			// use the original signed registration
-			signedRegistration = registration
-		}
+		} // else the payout recipient is the same as the payload so signed registration has already been set
 
 		// Create mapping of qualified registrations to proceed
 		registrations[signedRegistration.Message.Pubkey.String()] = k2common.K2ValidatorRegistration{

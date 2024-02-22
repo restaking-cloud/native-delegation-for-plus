@@ -7,6 +7,12 @@ import (
 )
 
 var (
+	LoggerLevelFlag = &cli.StringFlag{
+		Name:     ModuleName + "." + "logger-level",
+		Usage:    "The log level for the application",
+		Category: strings.ReplaceAll(strings.ToUpper(ModuleName), "_", " "),
+		Value:    "info",
+	}
 	WalletPrivateKeyFlag = &cli.StringFlag{
 		Name:     ModuleName + "." + "eth1-private-key",
 		Usage:    "The private key of the validator wallet. You can load multiple keys by separating them with a comma in order of priority",

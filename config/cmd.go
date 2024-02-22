@@ -20,6 +20,7 @@ func NewCommand() *cli.Command {
 
 func k2Flags() []cli.Flag {
 	return []cli.Flag{
+		LoggerLevelFlag,
 		WalletPrivateKeyFlag,
 		Web3SignerUrlFlag,
 		PayoutRecipientFlag,

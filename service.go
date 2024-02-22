@@ -115,15 +115,23 @@ func (k2 *K2Service) Start() error {
 	// start monitoring
 	go k2.monitor()
 
-	var addresses []string
-	for _, wallet := range k2.cfg.ValidatorWallets {
-		addresses = append(addresses, wallet.Address.String())
+	var addresses string
+	var addressesField string = "representativeAddress"
+	for i, wallet := range k2.cfg.ValidatorWallets {
+		delimiter := ","
+		if i == len(k2.cfg.ValidatorWallets)-1 {
+			delimiter = ""
+			if i > 0 {
+				addressesField = "representativeAddresses"
+			}
+		}
+		addresses += wallet.Address.String() + delimiter
 	}
 
 	k2.log.WithFields(logrus.Fields{
-		"representativeAddresss": addresses,
-		"registryEnabled":        registryEnabled,
-		"k2Enabled":              k2Enabled,
+		addressesField:    addresses,
+		"registryEnabled": registryEnabled,
+		"k2Enabled":       k2Enabled,
 	}).Info("Started K2 module")
 
 	return nil
@@ -378,7 +386,7 @@ func (k2 *K2Service) Status() error {
 
 	// check web3 signer is up if configured
 	if k2.cfg.Web3SignerUrl != nil {
-		_, err = k2.web3Signer.Status()
+		err = k2.web3Signer.Status()
 		if err != nil {
 			return fmt.Errorf("web3 signer is down: %v", err)
 		}

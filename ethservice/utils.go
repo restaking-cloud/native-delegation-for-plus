@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"math/big"
 
 	ethereum "github.com/ethereum/go-ethereum"
 	types "github.com/ethereum/go-ethereum/core/types"
@@ -79,6 +80,17 @@ func (e *EthService) transact(context context.Context, tx *types.Transaction, pk
 		Data:      tx.Data(),
 		To:        tx.To(),
 	})
+
+	// calculate the total transaction cost to check if the wallet has enough balance
+	maxTxCost := new(big.Int).Mul(gasPrice, new(big.Int).SetUint64(gasLimit))
+	txCost := new(big.Int).Add(maxTxCost, tx.Value())
+	balance, err := e.client.BalanceAt(context, walletAddress, nil)
+	if err != nil {
+		return signedTx, fmt.Errorf("failed to get wallet balance: %w", err)
+	}
+	if balance.Cmp(txCost) < 0 {
+		return signedTx, fmt.Errorf("wallet balance (%s) is lower than the total transaction cost (%s)", new(big.Float).Quo(new(big.Float).SetInt(balance), new(big.Float).SetInt64(1e18)).String(), new(big.Float).Quo(new(big.Float).SetInt(txCost), new(big.Float).SetInt64(1e18)).String())
+	}
 
 	signer := types.LatestSignerForChainID(e.cfg.ChainID)
 
