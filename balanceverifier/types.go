@@ -2,13 +2,8 @@ package balanceverifier
 
 import (
 	"github.com/attestantio/go-eth2-client/spec/phase0"
+	k2Common "github.com/restaking-cloud/native-delegation-for-plus/common"
 )
-
-type EcdsaSignature struct {
-	R string `json:"r"`
-	S string `json:"s"`
-	V uint8 `json:"v"`
-}
 
 type ReportEffectiveBalanceResponse struct {
 	Responses []ReportEffectiveBalanceResponseItem `json:"responses"`
@@ -16,7 +11,7 @@ type ReportEffectiveBalanceResponse struct {
 
 type ReportEffectiveBalanceResponseItem struct {
 	Report                      EffectiveBalanceReport `json:"report"`
-	DesignatedVerifierSignature EcdsaSignature         `json:"designatedVerifierSignature"`
+	DesignatedVerifierSignature k2Common.EcdsaSignature         `json:"designatedVerifierSignature"`
 }
 
 type EffectiveBalanceReport struct {

@@ -43,14 +43,14 @@ func (e *EthService) configureK2LendingContract(address common.Address) error {
 
 	contractAbi, err := abi.JSON(strings.NewReader(contracts.K2_LENDING_CONTRACT_ABI))
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to parse k2 lending contract abi: %w", err)
 	}
 	e.cfg.K2LendingContractABI = &contractAbi
 
 	// check if the contract is deployed
 	contractByteCode, err := e.client.CodeAt(context.Background(), address, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get k2 lending contract code: %w", err)
 	}
 
 	if len(contractByteCode) == 0 {
@@ -65,14 +65,14 @@ func (e *EthService) configureK2NodeOperatorContract(address common.Address) err
 
 	contractAbi, err := abi.JSON(strings.NewReader(contracts.K2_NODE_OPERATOR_CONTRACT_ABI))
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to parse k2 node operator contract abi: %w", err)
 	}
 	e.cfg.K2NodeOperatorContractABI = &contractAbi
 
 	// check if the contract is deployed
 	contractByteCode, err := e.client.CodeAt(context.Background(), address, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get k2 node operator contract code: %w", err)
 	}
 
 	if len(contractByteCode) == 0 {
@@ -108,14 +108,14 @@ func (e *EthService) configureMulticallContract(address common.Address) error {
 
 	contractAbi, err := abi.JSON(strings.NewReader(contracts.MULTICALL3_CONTRACT_ABI))
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to parse multicall contract abi: %w", err)
 	}
 	e.cfg.MulticallContractABI = &contractAbi
 
 	// check if the contract is deployed
 	contractByteCode, err := e.client.CodeAt(context.Background(), address, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get multicall contract code: %w", err)
 	}
 
 	if len(contractByteCode) == 0 {

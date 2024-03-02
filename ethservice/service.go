@@ -2,11 +2,11 @@ package ethservice
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"encoding/hex"
 	"fmt"
 	"math/big"
 	"strings"
-	"crypto/ecdsa"
 
 	"github.com/attestantio/go-eth2-client/spec/phase0"
 	ethereum "github.com/ethereum/go-ethereum"
@@ -38,7 +38,7 @@ func (e *EthService) Configure(cfg config.EthServiceConfig, logger *logrus.Entry
 
 	err := e.connect(cfg.ExecutionNodeUrl)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to connect to execution node: %w", err)
 	}
 
 	err = e.configureMulticallContract(common.HexToAddress(contracts.MULTICALL3_CONTRACT_ADDRESS))
@@ -132,11 +132,20 @@ func (e *EthService) SetMaxGasPrice(maxGasPrice uint64) {
 	}
 }
 
+func (e *EthService) GetBlock(number *big.Int) (*types.Block, error) {
+
+	block, err := e.client.BlockByNumber(context.Background(), number)
+	if err != nil {
+		return nil, fmt.Errorf("error fetching block: %w", err)
+	}
+	return block, nil
+}
+
 func (e *EthService) FetchProposerRegistryAddressFromK2Lending() (string, error) {
 
 	data, err := e.cfg.K2LendingContractABI.Pack("proposerRegistry")
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("error packing proposerRegistry call: %w", err)
 	}
 
 	callResult, err := e.client.CallContract(context.Background(), ethereum.CallMsg{
@@ -145,13 +154,13 @@ func (e *EthService) FetchProposerRegistryAddressFromK2Lending() (string, error)
 		Data: data,
 	}, nil)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("error calling proposerRegistry: %w", err)
 	}
 
 	var contractAddress common.Address
 	err = e.cfg.K2LendingContractABI.UnpackIntoInterface(&contractAddress, "proposerRegistry", callResult)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("error unpacking proposerRegistry result: %w", err)
 	}
 
 	return contractAddress.String(), nil
@@ -406,7 +415,7 @@ func (e *EthService) BatchK2CheckRegisteredValidators(validators []phase0.BLSPub
 	return results, nil
 }
 
-func (e *EthService) NodeOperatorToPayoutRecipient(nodeOperatorAddresses []common.Address) (map[string]common.Address, error) {
+func (e *EthService) K2NodeOperatorToPayoutRecipient(nodeOperatorAddresses []common.Address) (map[string]common.Address, error) {
 
 	var multicallInputs contracts.Multicall3AggregateArgs
 
@@ -555,19 +564,19 @@ func (e *EthService) K2BatchNativeDelegation(validatorRegistrations []k2common.K
 
 // Rewards Claiming
 
-func (e *EthService) BatchK2CheckClaimableRewards(validators []phase0.BLSPubKey) (map[string]uint64, error) {
+func (e *EthService) BatchK2CheckClaimableRewards(nodeOperators []common.Address) (map[common.Address]uint64, error) {
 
 	var multicallInputs contracts.Multicall3AggregateArgs
 
-	results := make(map[string]uint64)
+	results := make(map[common.Address]uint64)
 
-	if len(validators) == 0 {
+	if len(nodeOperators) == 0 {
 		return results, nil
 	}
 
-	for _, validator := range validators {
+	for _, nodeOperator := range nodeOperators {
 
-		data, err := e.cfg.K2LendingContractABI.Pack("claimableKETHForNodeOperator", validator[:])
+		data, err := e.cfg.K2LendingContractABI.Pack("claimableKETHForNodeOperator", nodeOperator)
 		if err != nil {
 			return nil, err
 		}
@@ -599,12 +608,12 @@ func (e *EthService) BatchK2CheckClaimableRewards(validators []phase0.BLSPubKey)
 		return nil, fmt.Errorf("error unpacking batch call result: %w", err)
 	}
 
-	successfulValidatorChecks := make(map[string]uint64)
-	failedValidatorChecks := make(map[string]uint64)
+	successfulValidatorChecks := make(map[common.Address]uint64)
+	failedValidatorChecks := make(map[common.Address]uint64)
 
-	for i, validator := range validators {
+	for i, nodeOperator := range nodeOperators {
 		if !batchCallResultDecoded.ReturnData[i].Success {
-			failedValidatorChecks[validator.String()] = 0
+			failedValidatorChecks[nodeOperator] = 0
 			continue
 		}
 
@@ -614,7 +623,7 @@ func (e *EthService) BatchK2CheckClaimableRewards(validators []phase0.BLSPubKey)
 			return nil, fmt.Errorf("error unpacking claimableKETHForNodeOperator result: %w", err)
 		}
 
-		successfulValidatorChecks[validator.String()] = claimableRewards.Uint64()
+		successfulValidatorChecks[nodeOperator] = claimableRewards.Uint64()
 	}
 
 	for k, v := range successfulValidatorChecks {
@@ -646,13 +655,13 @@ func (e *EthService) BatchK2ClaimRewards(rewardClaims []k2common.K2Claim) (tx *t
 
 		effectiveBalances = append(effectiveBalances, big.NewInt(0).SetUint64(claim.EffectiveBalance))
 
-		sig_r, err := hex.DecodeString(strings.TrimPrefix(claim.ECDSASignature.R, "0x"))
+		sig_r, err := hex.DecodeString(strings.TrimPrefix(claim.EffectiveBalanceReportSignature.R, "0x"))
 		if err != nil {
 			return nil, err
 		}
 		var sig_r32 [32]byte
 		copy(sig_r32[:], sig_r)
-		sig_s, err := hex.DecodeString(strings.TrimPrefix(claim.ECDSASignature.S, "0x"))
+		sig_s, err := hex.DecodeString(strings.TrimPrefix(claim.EffectiveBalanceReportSignature.S, "0x"))
 		if err != nil {
 			return nil, err
 		}
@@ -663,7 +672,7 @@ func (e *EthService) BatchK2ClaimRewards(rewardClaims []k2common.K2Claim) (tx *t
 			R [32]byte
 			S [32]byte
 		}{
-			V: claim.ECDSASignature.V,
+			V: claim.EffectiveBalanceReportSignature.V,
 			R: sig_r32,
 			S: sig_s32,
 		})

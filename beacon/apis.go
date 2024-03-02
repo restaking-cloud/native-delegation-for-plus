@@ -20,6 +20,10 @@ func (b *BeaconService) FinalizedValidatorEffectiveBalance(blsKeys []phase0.BLSP
 
 	res = make(map[phase0.BLSPubKey]uint64)
 
+	if len(blsKeys) == 0 {
+		return res, nil
+	}
+
 	validatorInfo, err := b.getValidatorsFinalizedInfo(context.Background(), blsKeys)
 	if err != nil {
 		return res, err

@@ -27,6 +27,7 @@ func k2Flags() []cli.Flag {
 		BeaconNodeUrlFlag,
 		ExecutionNodeUrlFlag,
 		ExclusionListFlag,
+		StrictInclusionListFileFlag,
 		RepresentativeMappingFlag,
 		MaxGasPriceFlag,
 		RegistrationOnlyFlag,
@@ -37,5 +38,6 @@ func k2Flags() []cli.Flag {
 		ProposerRegistryContractAddressFlag,
 		SignatureSwapperUrlFlag,
 		BalanceVerificationUrlFlag,
+		SubgraphUrlFlag,
 	}
 }

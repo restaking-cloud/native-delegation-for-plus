@@ -103,7 +103,7 @@ func (e *EthService) transact(context context.Context, tx *types.Transaction, pk
 	var pending bool
 
 	sendErr := e.client.SendTransaction(context, signedTx)
-	if err != nil {
+	if sendErr != nil {
 		// check if the transaction was already sent using the hash and if in pending ignore the error
 		// this is to handle the case where the transaction was sent but the response was lost or returned a bug error
 		_, pending, err = e.client.TransactionByHash(context, signedTx.Hash())

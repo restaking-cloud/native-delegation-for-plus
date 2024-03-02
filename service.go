@@ -3,7 +3,9 @@ package k2
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	beaconConfig "github.com/restaking-cloud/native-delegation-for-plus/beacon/config"
 	k2common "github.com/restaking-cloud/native-delegation-for-plus/common"
 	"github.com/restaking-cloud/native-delegation-for-plus/signatureswapper"
+	"github.com/restaking-cloud/native-delegation-for-plus/subgraph"
 	"github.com/restaking-cloud/native-delegation-for-plus/web3signer"
 
 	apiv1 "github.com/attestantio/go-builder-client/api/v1"
@@ -32,6 +35,7 @@ type K2Service struct {
 	coreClient       *coreCommon.Client
 	log              *logrus.Entry
 	signatureSwapper *signatureswapper.SignatureSwapperService
+	subgraph         *subgraph.SubgraphService
 	web3Signer       *web3signer.Web3SignerService
 	eth1             *ethservice.EthService
 	beacon           *beacon.BeaconService
@@ -40,8 +44,10 @@ type K2Service struct {
 
 	server *http.Server
 
-	exclusionList         map[string]k2common.ExcludedValidator
-	representativeMapping map[string]ethcommon.Address // Fee recipient address -> Representative address
+	exclusionList         map[string]k2common.ValidatorFilter // [Validator pubKey / Fee recipient address] -> Validator filter
+	strictInclusionList   map[string]k2common.ValidatorFilter // [Validator pubKey / Fee recipient address] -> Validator filter
+	representativeMapping map[string]ethcommon.Address        // [Fee recipient address / Validator pubKey] -> Representative address
+	// *NOTE* Keep/Access the keys of the above maps in lower case to avoid case sensitivity issues [mixed checksums, etc.]
 
 	// Track the last most recent timestamp that was processed
 	lastRegistrationMessageTimestamp time.Time
@@ -54,15 +60,18 @@ type K2Service struct {
 
 func NewK2Service() *K2Service {
 	return &K2Service{
-		log:              logrus.NewEntry(logrus.New()).WithField("moduleExecution", config.ModuleName),
-		signatureSwapper: signatureswapper.NewSignatureSwapperService(),
-		web3Signer:       web3signer.NewWeb3SignerService(),
-		eth1:             ethservice.NewEthService(),
-		beacon:           beacon.NewBeaconService(),
-		balanceverifier:  balanceverifier.NewBalanceVerifierService(),
-		exclusionList:    make(map[string]k2common.ExcludedValidator),
-		exit:             make(chan struct{}),
-		cfg:              config.K2ConfigDefaults,
+		log:                   logrus.NewEntry(logrus.New()).WithField("moduleExecution", config.ModuleName),
+		signatureSwapper:      signatureswapper.NewSignatureSwapperService(),
+		subgraph:              subgraph.NewSubgraphService(),
+		web3Signer:            web3signer.NewWeb3SignerService(),
+		eth1:                  ethservice.NewEthService(),
+		beacon:                beacon.NewBeaconService(),
+		balanceverifier:       balanceverifier.NewBalanceVerifierService(),
+		exclusionList:         make(map[string]k2common.ValidatorFilter),
+		strictInclusionList:   make(map[string]k2common.ValidatorFilter),
+		representativeMapping: make(map[string]ethcommon.Address),
+		exit:                  make(chan struct{}),
+		cfg:                   config.K2ConfigDefaults,
 	}
 }
 
@@ -90,6 +99,11 @@ func (k2 *K2Service) Start() error {
 	// start monitoring the exclusion list file
 	if k2.cfg.ExclusionListFile != "" {
 		go k2.watchFile("exclusion list", k2.cfg.ExclusionListFile, k2.readExclusionList, k2.clearExclusionList)
+	}
+
+	// start monitoring the inclusion list file
+	if k2.cfg.StrictInclusionListFile != "" {
+		go k2.watchFile("strict inclusion list", k2.cfg.StrictInclusionListFile, k2.readInclusionList, k2.clearInclusionList)
 	}
 
 	// start monitoring the representative mapping file
@@ -188,7 +202,7 @@ func (k2 *K2Service) monitor() error {
 func (k2 *K2Service) Stop() error {
 
 	// stop monitoring files
-	if k2.cfg.ExclusionListFile != "" || k2.cfg.RepresentativeMappingFile != "" {
+	if k2.cfg.ExclusionListFile != "" || k2.cfg.RepresentativeMappingFile != "" || k2.cfg.StrictInclusionListFile != "" {
 		close(k2.exit)
 	}
 
@@ -295,6 +309,13 @@ func (k2 *K2Service) Configure(moduleFlags common.ModuleFlags) (err error) {
 		} else {
 			k2.log.Debugf("User provided BalanceVerificationUrl: %s", k2.cfg.BalanceVerificationUrl.String())
 		}
+
+		if k2.cfg.SubgraphUrl == nil {
+			k2.cfg.SubgraphUrl = knownConfig.SubgraphUrl
+		} else {
+			k2.log.Debugf("User provided SubgraphUrl: %s", k2.cfg.SubgraphUrl.String())
+		}
+
 	}
 
 	if k2.cfg.RegistrationOnly {
@@ -353,6 +374,41 @@ func (k2 *K2Service) Configure(moduleFlags common.ModuleFlags) (err error) {
 		if balanceVerifierChainId != chainId {
 			// wrong chain id configured for the effective balance verification service, needs to match the beacon node (validator truth source)
 			return fmt.Errorf("chain id mismatch: beacon node reports %v, balance verifier reports %v", chainId, balanceVerifierChainId)
+		}
+
+		// Subgraph is not essential for operations, just to query delegated validators
+		// only attempt to configure if exists and configurable
+		if k2.cfg.SubgraphUrl != nil {
+			err = k2.subgraph.Configure(k2.cfg.SubgraphUrl)
+			if err != nil {
+				return err
+			}
+
+			metaInfo, err := k2.subgraph.MetaInfo()
+			if err != nil {
+				return err
+			}
+
+			blockInfo, err := k2.eth1.GetBlock(big.NewInt(int64(metaInfo.Meta.Block.Number)))
+			if err != nil {
+				return err
+			}
+
+			// If blockhash from subgraph and blockhash from eth1 node match for the given latest subgraph block number
+			if strings.EqualFold(metaInfo.Meta.Block.Hash, blockInfo.Hash().String()) {
+				k2.log.WithFields(
+					logrus.Fields{
+						"blockNumber":            metaInfo.Meta.Block.Number,
+						"blockHash":              metaInfo.Meta.Block.Hash,
+						"deducedSubgraphChainId": eth1ChainId,
+					},
+				).Debug("Subgraph blockhash matches eth1 node blockhash for the latest subgraph block number")
+				// then set the configured eth1 connected chain ID to the subgraph chain ID
+				k2.subgraph.SetConnectedChainID(big.NewInt(int64(eth1ChainId)))
+			} else {
+				return fmt.Errorf("invalid subgraph: subgraph blockhash does not match eth1 node blockhash for the latest subgraph block number")
+			}
+
 		}
 	}
 

@@ -4,22 +4,17 @@ import (
 	apiv1 "github.com/attestantio/go-builder-client/api/v1"
 	phase0 "github.com/attestantio/go-eth2-client/spec/phase0"
 	"github.com/ethereum/go-ethereum/common"
+	k2Common "github.com/restaking-cloud/native-delegation-for-plus/common"
 )
-
-type EcdsaSignature struct {
-	R string `json:"r"`
-	S string `json:"s"`
-	V uint8 `json:"v"`
-}
 
 type SignatureSwapResponse struct {
 	OriginalData   *apiv1.SignedValidatorRegistration `json:"originalData"`
-	EcdsaSignature EcdsaSignature                     `json:"ecdsaSignature"`
+	EcdsaSignature k2Common.EcdsaSignature                     `json:"ecdsaSignature"`
 }
 
 type BatchSignatureSwapResponse struct {
 	OriginalData    []OriginalDataForBatchResponse `json:"originalData"`
-	EcdsaSignatures []EcdsaSignature               `json:"ecdsaSignatures"`
+	EcdsaSignatures []k2Common.EcdsaSignature               `json:"ecdsaSignatures"`
 }
 
 type OriginalDataForBatchResponse struct {

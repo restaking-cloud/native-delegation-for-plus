@@ -15,6 +15,7 @@ import (
 	"github.com/attestantio/go-eth2-client/spec/phase0"
 
 	"github.com/ethereum/go-ethereum/common"
+	k2Common "github.com/restaking-cloud/native-delegation-for-plus/common"
 
 	"github.com/restaking-cloud/native-delegation-for-plus/signatureswapper/config"
 )
@@ -40,7 +41,7 @@ func (s *SignatureSwapperService) Configure(url *url.URL) error {
 
 	info, err := s.GetInfo()
 	if err != nil {
-		return err
+		return fmt.Errorf("signatureswapperservice: failed to get info: %w", err)
 	}
 
 	s.cfg.Domain = info.GasLimitProposerRegistryDomain
@@ -83,7 +84,7 @@ func (s *SignatureSwapperService) GetInfo() (Info, error) {
 func (s *SignatureSwapperService) GenerateSignature(
 	registration apiv1.SignedValidatorRegistration,
 	representativeAddress common.Address,
-) (EcdsaSignature, error) {
+) (k2Common.EcdsaSignature, error) {
 
 	payload := SignatureSwapPayload{
 		Signature:             registration.Signature,
@@ -92,31 +93,31 @@ func (s *SignatureSwapperService) GenerateSignature(
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		return EcdsaSignature{}, err
+		return k2Common.EcdsaSignature{}, err
 	}
 
 	req, err := http.NewRequestWithContext(context.Background(), "POST", s.cfg.Url.String()+GenerateSignaturePath, bytes.NewReader(payloadBytes))
 	if err != nil {
-		return EcdsaSignature{}, err
+		return k2Common.EcdsaSignature{}, err
 	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return EcdsaSignature{}, err
+		return k2Common.EcdsaSignature{}, err
 	}
 
 	if resp.StatusCode != 200 {
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			return EcdsaSignature{}, fmt.Errorf("error reading invalid response (%d) body: %v", resp.StatusCode, err)
+			return k2Common.EcdsaSignature{}, fmt.Errorf("error reading invalid response (%d) body: %v", resp.StatusCode, err)
 		}
 
-		return EcdsaSignature{}, fmt.Errorf("invalid response (%d): %v", resp.StatusCode, string(body))
+		return k2Common.EcdsaSignature{}, fmt.Errorf("invalid response (%d): %v", resp.StatusCode, string(body))
 	}
 
 	var response SignatureSwapResponse
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		return EcdsaSignature{}, err
+		return k2Common.EcdsaSignature{}, err
 	}
 
 	return response.EcdsaSignature, nil
@@ -125,11 +126,11 @@ func (s *SignatureSwapperService) GenerateSignature(
 func (s *SignatureSwapperService) BatchGenerateSignature(
 	registration []apiv1.SignedValidatorRegistration,
 	representativeAddress common.Address,
-) (map[phase0.BLSPubKey]EcdsaSignature, error) {
+) (map[phase0.BLSPubKey]k2Common.EcdsaSignature, error) {
 
 	payload := BatchSignatureSwapPayload{}
 
-	res := make(map[phase0.BLSPubKey]EcdsaSignature)
+	res := make(map[phase0.BLSPubKey]k2Common.EcdsaSignature)
 
 	if len(registration) == 0 {
 		return res, nil

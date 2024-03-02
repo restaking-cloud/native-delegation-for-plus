@@ -77,6 +77,8 @@ func (k2 *K2Service) parseConfig(moduleFlags common.ModuleFlags) (err error) {
 			}
 		case config.ExclusionListFlag.Name:
 			k2.cfg.ExclusionListFile = flagValue
+		case config.StrictInclusionListFileFlag.Name:
+			k2.cfg.StrictInclusionListFile = flagValue
 		case config.RepresentativeMappingFlag.Name:
 			k2.cfg.RepresentativeMappingFile = flagValue
 		case config.MaxGasPriceFlag.Name:
@@ -131,6 +133,11 @@ func (k2 *K2Service) parseConfig(moduleFlags common.ModuleFlags) (err error) {
 			k2.cfg.BalanceVerificationUrl, err = k2common.CreateUrl(flagValue)
 			if err != nil {
 				return fmt.Errorf("-%s: invalid url %q", config.BalanceVerificationUrlFlag.Name, flagValue)
+			}
+		case config.SubgraphUrlFlag.Name:
+			k2.cfg.SubgraphUrl, err = k2common.CreateUrl(flagValue)
+			if err != nil {
+				return fmt.Errorf("-%s: invalid url %q", config.SubgraphUrlFlag.Name, flagValue)
 			}
 		default:
 			return fmt.Errorf("unknown flag %q", flagName)
@@ -192,6 +199,14 @@ func (k2 *K2Service) checkConfig() error {
 		}
 	}
 
+	// check if strict list file is set
+	if k2.cfg.StrictInclusionListFile != "" {
+		err := k2.readInclusionList(k2.cfg.StrictInclusionListFile)
+		if err != nil {
+			return err
+		}
+	}
+
 	// check if representative mapping file is set
 	if k2.cfg.RepresentativeMappingFile != "" {
 		err := k2.readRepresentativeMapping(k2.cfg.RepresentativeMappingFile)
@@ -218,35 +233,68 @@ func (k2 *K2Service) readExclusionList(filePath string) error {
 		return fmt.Errorf("failed to read exclusion list file: %w", err)
 	}
 
-	var exclusionList []k2common.ExcludedValidator
+	var exclusionList []k2common.ValidatorFilter
 	err = json.Unmarshal(fileContent, &exclusionList)
 	if err != nil {
 		return fmt.Errorf("failed to parse exclusion list file: %w", err)
 	}
 
-	preparedExclusionList := make(map[string]k2common.ExcludedValidator)
+	preparedExclusionList := make(map[string]k2common.ValidatorFilter)
 
 	// Store the exclusion list
 	k2.lock.Lock()
 	defer k2.lock.Unlock()
-	for _, excludedValidator := range exclusionList {
-		// check if validator is already in the exclusion list
-		if _, ok := preparedExclusionList[excludedValidator.PublicKey.String()]; ok {
-			return fmt.Errorf("duplicate validator %s in exclusion list", excludedValidator.PublicKey.String())
+	for _, entry := range exclusionList {
+		// check if both a PublicKey and FeeRecipient are specified
+		if entry.PublicKey != (phase0.BLSPubKey{}) && entry.FeeRecipient != (eth1Common.Address{}) {
+			return fmt.Errorf("invalid exclusion list entry [%s, %s], cannot specify both PublicKey and FeeRecipient in a single entry", entry.PublicKey.String(), entry.FeeRecipient.String())
 		}
-		if excludedValidator.PublicKey == (phase0.BLSPubKey{}) {
-			return fmt.Errorf("invalid validator %s in exclusion list", excludedValidator.PublicKey.String())
+
+		if entry.PublicKey == (phase0.BLSPubKey{}) && entry.FeeRecipient == (eth1Common.Address{}) {
+			return fmt.Errorf("invalid exclusion list entry [%s, %s], must specify either PublicKey or FeeRecipient in a single entry", entry.PublicKey.String(), entry.FeeRecipient.String())
 		}
-		if !excludedValidator.ExcludedFromNativeDelegation && !excludedValidator.ExcludedFromProposerRegistration {
-			return fmt.Errorf("validator in exclusion list %s must be excluded from either native delegation or proposer registration", excludedValidator.PublicKey.String())
+
+		if entry.ProposerRegistration && entry.NativeDelegation {
+			entryForText := "validator"
+			entryFor := entry.PublicKey.String()
+			if entry.FeeRecipient != (eth1Common.Address{}) {
+				entryForText = "fee recipient"
+				entryFor = entry.FeeRecipient.String()
+			}
+
+			return fmt.Errorf("invalid exclusion list entry for %s, cannot exclude %s, as it has been set to be allowed for both proposer registration and native delegation", entryForText, entryFor)
 		}
-		preparedExclusionList[excludedValidator.PublicKey.String()] = excludedValidator
+
+		if entry.PublicKey != (phase0.BLSPubKey{}) {
+			// check if validator is already in the exclusion list
+			if _, ok := preparedExclusionList[strings.ToLower(entry.PublicKey.String())]; ok {
+				return fmt.Errorf("duplicate validator %s in exclusion list", entry.PublicKey.String())
+			}
+			// check if validator is in the inclusion list
+			if _, ok := k2.strictInclusionList[strings.ToLower(entry.PublicKey.String())]; ok {
+				return fmt.Errorf("validator %s is in both exclusion and inclusion list", entry.PublicKey.String())
+			}
+			preparedExclusionList[strings.ToLower(entry.PublicKey.String())] = entry
+		} else if entry.FeeRecipient != (eth1Common.Address{}) {
+			// check if fee recipient is already in the exclusion list
+			if _, ok := preparedExclusionList[strings.ToLower(entry.FeeRecipient.String())]; ok {
+				return fmt.Errorf("duplicate fee recipient %s in exclusion list", entry.FeeRecipient.String())
+			}
+			// check if fee recipient is in the inclusion list
+			if _, ok := k2.strictInclusionList[strings.ToLower(entry.FeeRecipient.String())]; ok {
+				return fmt.Errorf("fee recipient %s is in both exclusion and inclusion list", entry.FeeRecipient.String())
+			}
+			preparedExclusionList[strings.ToLower(entry.FeeRecipient.String())] = entry
+		} else {
+			// should never reach here but to ensure we do not proceed past an invalid entry in the file
+			return fmt.Errorf("invalid exclusion list entry [%s, %s], must specify either PublicKey or FeeRecipient in a single entry", entry.PublicKey.String(), entry.FeeRecipient.String())
+		}
 	}
 
 	k2.exclusionList = preparedExclusionList
 
 	if len(k2.exclusionList) > 0 {
-		k2.log.Infof("Exclusion list updated with %d validators", len(k2.exclusionList))
+		k2.log.Infof("Exclusion list updated with %d filters", len(k2.exclusionList))
 	}
 
 	return nil
@@ -255,7 +303,94 @@ func (k2 *K2Service) readExclusionList(filePath string) error {
 func (k2 *K2Service) clearExclusionList() error {
 	k2.lock.Lock()
 	defer k2.lock.Unlock()
-	k2.exclusionList = make(map[string]k2common.ExcludedValidator)
+	k2.exclusionList = make(map[string]k2common.ValidatorFilter)
+	return nil
+}
+
+func (k2 *K2Service) readInclusionList(filePath string) error {
+
+	// Read the inclusion list file
+	file, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to open inclusion list file: %w", err)
+	}
+	defer file.Close()
+	fileContent, err := io.ReadAll(file)
+	if err != nil {
+		return fmt.Errorf("failed to read inclusion list file: %w", err)
+	}
+
+	var inclusionList []k2common.ValidatorFilter
+	err = json.Unmarshal(fileContent, &inclusionList)
+	if err != nil {
+		return fmt.Errorf("failed to parse inclusion list file: %w", err)
+	}
+
+	preparedInclusionList := make(map[string]k2common.ValidatorFilter)
+
+	// Store the inclusion list
+	k2.lock.Lock()
+	defer k2.lock.Unlock()
+	for _, entry := range inclusionList {
+		// check if both a PublicKey and FeeRecipient are specified
+		if entry.PublicKey != (phase0.BLSPubKey{}) && entry.FeeRecipient != (eth1Common.Address{}) {
+			return fmt.Errorf("invalid inclusion list entry [%s, %s], cannot specify both PublicKey and FeeRecipient in a single entry", entry.PublicKey.String(), entry.FeeRecipient.String())
+		}
+
+		if entry.PublicKey == (phase0.BLSPubKey{}) && entry.FeeRecipient == (eth1Common.Address{}) {
+			return fmt.Errorf("invalid inclusion list entry [%s, %s], must specify either PublicKey or FeeRecipient in a single entry", entry.PublicKey.String(), entry.FeeRecipient.String())
+		}
+
+		if !entry.ProposerRegistration && !entry.NativeDelegation {
+			entryForText := "validator"
+			entryFor := entry.PublicKey.String()
+			if entry.FeeRecipient != (eth1Common.Address{}) {
+				entryForText = "fee recipient"
+				entryFor = entry.FeeRecipient.String()
+			}
+
+			return fmt.Errorf("invalid inclusion list entry for %s, cannot include %s, as it has been set to be to not process both proposer registration and native delegation", entryForText, entryFor)
+		}
+
+		if entry.PublicKey != (phase0.BLSPubKey{}) {
+			// check if validator is already in the inclusion list
+			if _, ok := preparedInclusionList[strings.ToLower(entry.PublicKey.String())]; ok {
+				return fmt.Errorf("duplicate validator %s in inclusion list", entry.PublicKey.String())
+			}
+			// check if validator is in the exclusion list
+			if _, ok := k2.exclusionList[strings.ToLower(entry.PublicKey.String())]; ok {
+				return fmt.Errorf("validator %s is in both exclusion and inclusion list", entry.PublicKey.String())
+			}
+			preparedInclusionList[strings.ToLower(entry.PublicKey.String())] = entry
+		} else if entry.FeeRecipient != (eth1Common.Address{}) {
+			// check if fee recipient is already in the inclusion list
+			if _, ok := preparedInclusionList[strings.ToLower(entry.FeeRecipient.String())]; ok {
+				return fmt.Errorf("duplicate fee recipient %s in inclusion list", entry.FeeRecipient.String())
+			}
+			// check if fee recipient is in the exclusion list
+			if _, ok := k2.exclusionList[strings.ToLower(entry.FeeRecipient.String())]; ok {
+				return fmt.Errorf("fee recipient %s is in both exclusion and inclusion list", entry.FeeRecipient.String())
+			}
+			preparedInclusionList[strings.ToLower(entry.FeeRecipient.String())] = entry
+		} else {
+			// should never reach here but to ensure we do not proceed past an invalid entry in the file
+			return fmt.Errorf("invalid exclusion list entry [%s, %s], must specify either PublicKey or FeeRecipient in a single entry", entry.PublicKey.String(), entry.FeeRecipient.String())
+		}
+	}
+
+	k2.strictInclusionList = preparedInclusionList
+
+	if len(k2.strictInclusionList) > 0 {
+		k2.log.Infof("Strict inclusion list updated with %d filters", len(k2.strictInclusionList))
+	}
+
+	return nil
+}
+
+func (k2 *K2Service) clearInclusionList() error {
+	k2.lock.Lock()
+	defer k2.lock.Unlock()
+	k2.strictInclusionList = make(map[string]k2common.ValidatorFilter)
 	return nil
 }
 
@@ -278,7 +413,7 @@ func (k2 *K2Service) readRepresentativeMapping(filePath string) error {
 	}
 
 	preparedRepresentativeMapping := make(map[string]eth1Common.Address)
-	trackRepresentativeMapping := make(map[string]bool)
+	trackRepresentativeMapping := make(map[string]eth1Common.Address)
 
 	// Store the representative mapping
 	k2.lock.Lock()
@@ -286,41 +421,53 @@ func (k2 *K2Service) readRepresentativeMapping(filePath string) error {
 	for _, representativeMapping := range representativeMappingList {
 		if representativeMapping.RepresentativeAddress == (eth1Common.Address{}) {
 			return fmt.Errorf("invalid representative address %s in representative mapping", representativeMapping.RepresentativeAddress.String())
-		}
-
-		if representativeMapping.FeeRecipientAddress == (eth1Common.Address{}) {
-			return fmt.Errorf("invalid fee recipient address %s in representative mapping", representativeMapping.FeeRecipientAddress.String())
-		}
-
-		if _, ok := preparedRepresentativeMapping[representativeMapping.FeeRecipientAddress.String()]; ok {
-			return fmt.Errorf("duplicate fee recipient %s in representative mapping", representativeMapping.FeeRecipientAddress.String())
-		}
-
-		if _, ok := trackRepresentativeMapping[representativeMapping.RepresentativeAddress.String()]; ok {
-			return fmt.Errorf("duplicate representative %s in representative mapping", representativeMapping.RepresentativeAddress.String())
-		}
-
-		// check if representative address is in configured wallets
-		found := false
-		for _, wallet := range k2.cfg.ValidatorWallets {
-			if wallet.Address == representativeMapping.RepresentativeAddress {
-				found = true
-				break
+		} else {
+			// check if representative address is in configured wallets
+			found := false
+			for _, wallet := range k2.cfg.ValidatorWallets {
+				if wallet.Address == representativeMapping.RepresentativeAddress {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("representative address %s in representative mapping is not a configured wallet", representativeMapping.RepresentativeAddress.String())
 			}
 		}
-		if !found {
-			return fmt.Errorf("representative address %s in representative mapping is not a configured wallet", representativeMapping.RepresentativeAddress.String())
+
+		if representativeMapping.FeeRecipientAddress == (eth1Common.Address{}) && representativeMapping.PublicKey == (phase0.BLSPubKey{}) {
+			return fmt.Errorf("invalid representative mapping entry [%s, %s], must specify either PublicKey or FeeRecipient in a single entry", representativeMapping.PublicKey.String(), representativeMapping.FeeRecipientAddress.String())
 		}
 
-		preparedRepresentativeMapping[representativeMapping.FeeRecipientAddress.String()] = representativeMapping.RepresentativeAddress
-		trackRepresentativeMapping[representativeMapping.RepresentativeAddress.String()] = true
+		if representativeMapping.FeeRecipientAddress != (eth1Common.Address{}) && representativeMapping.PublicKey != (phase0.BLSPubKey{}) {
+			return fmt.Errorf("invalid representative mapping entry [%s, %s], cannot specify both PublicKey and FeeRecipient in a single entry", representativeMapping.PublicKey.String(), representativeMapping.FeeRecipientAddress.String())
+		}
+
+		if representativeMapping.FeeRecipientAddress != (eth1Common.Address{}) {
+			if _, ok := preparedRepresentativeMapping[strings.ToLower(representativeMapping.FeeRecipientAddress.String())]; ok {
+				return fmt.Errorf("duplicate fee recipient %s in representative mapping", representativeMapping.FeeRecipientAddress.String())
+			}
+			if feeRecipient, ok := trackRepresentativeMapping[strings.ToLower(representativeMapping.RepresentativeAddress.String())]; ok {
+				return fmt.Errorf("this representative address %s is already specified for fee recipient %s, cannot use it for another fee recipient %s", representativeMapping.RepresentativeAddress.String(), feeRecipient.String(), representativeMapping.FeeRecipientAddress.String())
+			}
+			preparedRepresentativeMapping[strings.ToLower(representativeMapping.FeeRecipientAddress.String())] = representativeMapping.RepresentativeAddress
+			trackRepresentativeMapping[strings.ToLower(representativeMapping.RepresentativeAddress.String())] = representativeMapping.FeeRecipientAddress
+		} else if representativeMapping.PublicKey != (phase0.BLSPubKey{}) {
+			if _, ok := preparedRepresentativeMapping[strings.ToLower(representativeMapping.PublicKey.String())]; ok {
+				return fmt.Errorf("duplicate validator %s in representative mapping", representativeMapping.PublicKey.String())
+			}
+			preparedRepresentativeMapping[strings.ToLower(representativeMapping.PublicKey.String())] = representativeMapping.RepresentativeAddress
+		} else {
+			// should never reach here but to ensure we do not proceed past an invalid entry in the file
+			return fmt.Errorf("invalid representative mapping entry [%s, %s], must specify either PublicKey or FeeRecipient in a single entry", representativeMapping.PublicKey.String(), representativeMapping.FeeRecipientAddress.String())
+		}
 
 	}
 
 	k2.representativeMapping = preparedRepresentativeMapping
 
 	if len(k2.representativeMapping) > 0 {
-		k2.log.Infof("Representative mapping updated with %d representatives", len(k2.representativeMapping))
+		k2.log.Infof("Representative mapping updated with %d filters", len(k2.representativeMapping))
 	}
 
 	return nil

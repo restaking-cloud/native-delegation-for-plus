@@ -144,7 +144,9 @@ func (b *BeaconService) getValidatorsFinalizedInfo(ctx context.Context, blsKeys 
 		res = append(res, res2...)
 	}
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode == 404 {
+		return res, fmt.Errorf("invalid response (%d): one or more validators not found on the beacon chain", resp.StatusCode)
+	} else if resp.StatusCode != 200 {
 		return res, fmt.Errorf("invalid response (%d): %v", resp.StatusCode, resp)
 	}
 

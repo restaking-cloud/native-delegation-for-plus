@@ -1,10 +1,11 @@
 package beacon
 
 import (
+	"fmt"
 	"math/big"
 	"net/http"
-	"time"
 	"sync"
+	"time"
 
 	"github.com/restaking-cloud/native-delegation-for-plus/beacon/config"
 )
@@ -29,7 +30,7 @@ func (b *BeaconService) Configure(cfg config.BeaconConfig) error {
 
 	err := b.connect(cfg.BeaconNodeUrl)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to connect to beacon node: %w", err)
 	}
 
 	return nil

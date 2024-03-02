@@ -13,6 +13,7 @@ import (
 
 	"github.com/attestantio/go-eth2-client/spec/phase0"
 
+	k2Common "github.com/restaking-cloud/native-delegation-for-plus/common"
 	"github.com/restaking-cloud/native-delegation-for-plus/balanceverifier/config"
 )
 
@@ -37,7 +38,7 @@ func (s *BalanceVerifierService) Configure(url *url.URL) error {
 
 	info, err := s.GetInfo()
 	if err != nil {
-		return err
+		return fmt.Errorf("balanceverifierservice: failed to get info: %w", err)
 	}
 
 	s.cfg.ChainID = big.NewInt(int64(info.ChainID))
@@ -74,9 +75,14 @@ func (s *BalanceVerifierService) GetInfo() (Info, error) {
 
 func (s *BalanceVerifierService) ReportEffectiveBalance(
 	effectiveBalances map[phase0.BLSPubKey]uint64,
-) (res map[phase0.BLSPubKey]EcdsaSignature, err error) {
+) (res map[phase0.BLSPubKey]k2Common.EcdsaSignature, err error) {
 
 	payload := ReportEffectiveBalancePayload{}
+	res = make(map[phase0.BLSPubKey]k2Common.EcdsaSignature)
+
+	if len(effectiveBalances) == 0 {
+		return res, nil
+	}
 
 	for pubkey, effectiveBalance := range effectiveBalances {
 		payload.BLSPubKeys = append(payload.BLSPubKeys, pubkey)
@@ -117,7 +123,7 @@ func (s *BalanceVerifierService) ReportEffectiveBalance(
 		return res, fmt.Errorf("invalid response length: %d", len(response.Responses))
 	}
 
-	res = make(map[phase0.BLSPubKey]EcdsaSignature)
+	res = make(map[phase0.BLSPubKey]k2Common.EcdsaSignature)
 	for _, item := range response.Responses {
 		res[item.Report.BLSPubKey] = item.DesignatedVerifierSignature
 	}

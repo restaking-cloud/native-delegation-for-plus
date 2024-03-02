@@ -68,17 +68,65 @@ This module also supports the use of multiple representative wallets, in which c
 
 - `k2.balance-verifier-url`: The URL of the balance verifier service. This flag is optional and defaults to the network-specific balance verifier URL if not specified (overridden), or can be used to provide a custom balance verifier URL for unsupported networks. The balance verifier is used to verify the effective balance of the proposer wallet for balance report to the contracts for reward claiming or exiting the protocol.
 
-- `k2.exclusion-list`: This flag is used to specify a list of validator public keys to exclude from either on-chain registration or native delegation. The flag accepts a filepath to a JSON file containing the list of validator public keys to exclude. The file is continuously monitored by the software and would pick up any changes immediately, allowing you to manage your registrations without restarting MEV Plus. The JSON file should be in the following format:
+- `k2.strict-inclusion-list`: This flag is used to specify a list of validator public keys to solely process. The flag accepts a filepath to a JSON file containing the list of validator public keys/fee recipients to strictly process. The file is continuously monitored by the software and would pick up any changes immediately, allowing you to manage your registrations without restarting MEV Plus. The JSON file should be in the following format:
 
 ```json
 [
     {
         "publicKey": string,
-        "excludedFromProposerRegistration": bool,
-        "excludedFromNativeDelegation": bool
+        "allowProposerRegistration": bool,
+        "allowNativeDelegation": bool
+    },
+    ...,
+    {
+        "feeRecipientAddress": string,
+        "allowProposerRegistration": bool,
+        "allowNativeDelegation": bool
     }
 ]
 ```
+
+You may either strictly include by a specific validator BLS Public Key in the entry list or a group of validators that share a Fee Recipient Address on your node.
+
+eg. `k2.strict-inclusion-list ./inclusion-list.json`
+
+```json inclusion-list.json
+[
+  {
+    "publicKey": "0x93e2de67f75817c101c637b16efc4ba1de8374ed563a4cdcf2d6cc5ea6c1de4ab5abcefdb3bd2baa96a1a2ddb1847d08",
+    "allowProposerRegistration": false,
+    "allowNativeDelegation": true
+  },
+  {
+    "feeRecipientAddress": "0x22A3864baaE65a9e8E5C163F80F850ADFe40Ed90",
+    "allowProposerRegistration": true,
+    "allowNativeDelegation": true
+  },
+]
+```
+
+**NOTE**: Either or both the `allowProposerRegistration` and `allowNativeDelegation` fields must be set as if not specified, and defaults to `false`. If both feilds are `false` due to not specified or being set as false, then effectively this entry should not be included in the inclusion list as it means you do not intend to include it in any process (proposer registration nor native delgation).
+If `allowProposerRegistration` is set to `false`, the validator will not be registered on-chain in the Proposer Registry. And if this validator is intended to be natively delegated, and is not already in the Proposer Registry, the registration will fail, as native delegation requires registration in the Proposer Registry. However if this validator / group of validators are already registered in the proposer registry, their processing of netive delegation if set to true would be unaffected.
+
+- `k2.exclusion-list`: This flag is used to specify a list of validator public keys to exclude from either on-chain registration or native delegation. The flag accepts a filepath to a JSON file containing the list of validator public keys/fee recipients to exclude. The file is continuously monitored by the software and would pick up any changes immediately, allowing you to manage your registrations without restarting MEV Plus. The JSON file should be in the following format:
+
+```json
+[
+    {
+        "publicKey": string,
+        "allowProposerRegistration": bool,
+        "allowNativeDelegation": bool
+    },
+    ...,
+    {
+        "feeRecipientAddress": string,
+        "allowProposerRegistration": bool,
+        "allowNativeDelegation": bool
+    }
+]
+```
+
+You may either exclude by a specific validator BLS Public Key in the entry list or a group of validators that share a Fee Recipient Address on your node.
 
 eg. `k2.exclusion-list ./exclusion-list.json`
 
@@ -86,44 +134,52 @@ eg. `k2.exclusion-list ./exclusion-list.json`
 [
   {
     "publicKey": "0x93e2de67f75817c101c637b16efc4ba1de8374ed563a4cdcf2d6cc5ea6c1de4ab5abcefdb3bd2baa96a1a2ddb1847d08",
-    "excludedFromProposerRegistration": false,
-    "excludedFromNativeDelegation": true
+    "allowProposerRegistration": false,
+    "allowNativeDelegation": true
   },
   {
-    "publicKey": "0x83eef01c1dafda9ca1d4ec1e4d92ca8dac4131b7289c4b11e7024752ea66a5180462661b8b4a862b3aca970422377eb3",
-    "excludedFromProposerRegistration": true,
-    "excludedFromNativeDelegation": true
+    "feeRecipientAddress": "0x22A3864baaE65a9e8E5C163F80F850ADFe40Ed90",
+    "allowProposerRegistration": true,
+    "allowNativeDelegation": true
   },
 ]
 ```
 
-**NOTE**: The `excludedFromProposerRegistration` and `excludedFromNativeDelegation` fields are optional and default to `false` if not specified, either or both can be specified.
-If `excludedFromProposerRegistration` is set to `true`, the validator will not be registered on-chain in the Proposer Registry. And if this validator is intended to be natively delegated, and is not already in the Proposer Registry, the registration will fail, as native delegation requires registration in the Proposer Registry.
+**NOTE**: The `allowProposerRegistration` and `allowNativeDelegation` fields are optional and default to `false` if not specified and thus completely excludes the entry from all processing during proposer registration and/or native delegation. You cannot set both fields to `true` as that essentially means you do not intend to exclude the entry from any process.
+If `allowProposerRegistration` is set to `false`, the validator will not be registered on-chain in the Proposer Registry. And if this validator is intended to be natively delegated, and is not already in the Proposer Registry, the registration will fail, as native delegation requires registration in the Proposer Registry.
 
-- `k2.representative-mapping`: This flag is used to optionally specify a mapping of representative wallets that should be used to process validators to specific payout/feeRecipient addresses. The flag accepts a filepath to a JSON file containing the mapping of representative addresses designated to handle validators that pay to different k2 fee/payout recipients (any ECDSA address). The file is continuously monitored by the software and would pick up any changes immediately, allowing you to manage your registrations without restarting MEV Plus. The JSON file should be in the following format:
+- `k2.representative-mapping`: This flag is used to optionally specify a mapping of representative wallets that should be used to process validators to specific validators by BLS Key or specific payout/feeRecipient addresses. The flag accepts a filepath to a JSON file containing the mapping of representative addresses designated to specific validators or that would handle validators that pay to different k2 fee/payout recipients (any ECDSA address). The file is continuously monitored by the software and would pick up any changes immediately, allowing you to manage your registrations without restarting MEV Plus. The JSON file should be in the following format:
 
 ```json
 [
     {
         "representativeAddress": string,
         "feeRecipientAddress": string
+    },
+    ...,
+    {
+        "representativeAddress": string,
+        "publicKey": string
     }
 ]
+```
 
-```json
+eg. `k2.representative-mapping ./representative-mapping.json`
+
+```json representative-mapping.json
 [
   {
     "representativeAddress": "0x22A3864baaE65a9e8E5C163F80F850ADFe40Ed90",
     "feeRecipientAddress": "0x22A3864baaE65a9e8E5C163F80F850ADFe40Ed90"
   },
   {
-    "representativeAddress": "0x83eef01c1dafda9ca1d4ec1e4d92ca8dac4131b7289c4b11e7024752ea66a5180462661b8b4a862b3aca970422377eb3",
-    "feeRecipientAddress": "0x4b7D8790bE2000cCCDBa4b8Ef4F2f76A5ccd1427"
+    "representativeAddress": "0x22A3864baaE65a9e8E5C163F80F850ADFe40Ed90",
+    "publicKey": "0x93e2de67f75817c101c637b16efc4ba1de8374ed563a4cdcf2d6cc5ea6c1de4ab5abcefdb3bd2baa96a1a2ddb1847d08"
   }
 ]
 ```
 
-**NOTE**: Cannot provide more than one representative-feeRecipient pair with the same representative. Ensure that the representative addresses are the wallets available in the configured `k2.eth1-private-key` flag. This file is optional and is used to strictly inform the module to use the representative address to process the validators to the specified k2 fee/payout recipient address. If the representative address is not found in the `k2.eth1-private-key` flag, the module will not process the validators to the specified payout recipient address. If the node registration has a k2 fee/payout recipient not strictly specified in this file, the module would use the next available representative address in the `k2.eth1-private-key` flag to process the registration if possible.
+**NOTE**: Cannot provide more than one representative-feeRecipient pair with the same representative. Cannot provide more than one representative-PublicKey pair. Ensure that the representative addresses are the wallets available in the configured `k2.eth1-private-key` flag. This file is optional and is used to strictly inform the module to use the representative address to process specific validators or set of validators with a common fee recipient address on the node. If the representative address is not found in the `k2.eth1-private-key` flag, the module will not process the validators to the specified payout recipient address. If the node registration has validators and/or a validators with a common fee recipient not strictly specified in this file, the module would use the next available representative address in the `k2.eth1-private-key` flag to process the registration if possible.
 
 - `k2.logger-level`: The log level for the K2 Native Delegation module. This flag is optional and defaults to `info` if not specified. The available log levels are `debug`, `info`, `warn`, `error`, and `fatal`.
 
@@ -177,17 +233,55 @@ The module runs a REST API on `localhost` port `10000` by default. The API expos
 This endpoint is used to exit the protocol. It accepts a JSON body with the BLS Public Key of the validator to exit.
 
 ```json
-BLS Public Key {string}
+{
+  "validator": string
+}
 ```
 
 ### POST `/eth/v1/claim`
 
-This endpoint is used to claim rewards from the K2 contract. It accepts a JSON body with a list of BLS Public Keys of the validators to claim rewar
+This endpoint is used to claim rewards from the K2 contract. It accepts a JSON body with a list of node operator representative addresss to check for rewards and claim.
 
 ```json
+{
+  "nodeOperators": [
+    Representative Address {string},
+    Representative Address {string},
+    ...
+  ]
+}
+```
+*NOTE*: Payload is optional. If no payload is parsed `{}`, the module checks for rewards for the representative wallets configured under `k2.eth1-private-key` and claims any available rewards for those representatives (node operators).
+
+### GET `/eth/v1/delegated-validators`
+
+This endpoint is used to get the list of validators that are natively delegated to the K2 contract. It by default returns the list of all validators for the representative wallets configured under `k2.eth1-private-key` and their respective fee recipients. It optionally accepts a query parameter `representativeAddresses` to specify any representative wallets to check for their natively delegated validators. It also optionally accepts a query parameter `includeBalance` as (`true` string) to specify if the claimable rewards of representative node operators should be included in the response, as well as the effective balances of each node operator's delegated validator.
+
+```
+GET /eth/v1/delegated-validators?representativeAddresses=<representativeAddress>&includeBalance=true
+```
+
+You can pass multiple representative addresses as a comma-seperated string to `representativeAddresses` to get the list of validators for each representative address.
+
+```
+GET /eth/v1/delegated-validators?representativeAddresses=<representativeAddress1>,<representativeAddress2>,<representativeAddress3>&includeBalance=true
+```
+
+Response schema:
+```json response schema
 [
-  BLS Public Key {string},
-  BLS Public Key {string},
+  {
+    "representativeAddress": string,
+    "claimableRewards": uint64, *only if includeBalance is true
+    "delegatedValidators": [
+      {
+        "validatorPubKey": string,
+        "representativeAddress": string,
+        "effectiveBalance": uint64, (in wei) *only if includeBalance is true
+      },
+      ...
+    ]
+  },
   ...
 ]
 ```
@@ -206,7 +300,7 @@ This endpoint is used to register validators on-chain. It offers an alternative 
       "timestamp": uint64,
     },
       "signature": string
-    },
+    }
 ]
 ```
 

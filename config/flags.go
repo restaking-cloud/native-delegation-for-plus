@@ -44,6 +44,11 @@ var (
 		Usage:    "The list of addresses to exclude from either the Proposer Registration or Native Delegation",
 		Category: strings.ReplaceAll(strings.ToUpper(ModuleName), "_", " "),
 	}
+	StrictInclusionListFileFlag = &cli.StringFlag{
+		Name:     ModuleName + "." + "strict-inclusion-list",
+		Usage:    "The list of addresses to include in either the Proposer Registration or Native Delegation",
+		Category: strings.ReplaceAll(strings.ToUpper(ModuleName), "_", " "),
+	}
 	RepresentativeMappingFlag = &cli.StringFlag{
 		Name:     ModuleName + "." + "representative-mapping",
 		Usage:    "The mapping of representative addresses designated to handle validators that pay to different fee recipients",
@@ -92,6 +97,11 @@ var (
 	BalanceVerificationUrlFlag = &cli.StringFlag{
 		Name:     ModuleName + "." + "balance-verification-url",
 		Usage:    "The url of the balance verification service to override the internal configuration",
+		Category: strings.ReplaceAll(strings.ToUpper(ModuleName), "_", " "),
+	}
+	SubgraphUrlFlag = &cli.StringFlag{
+		Name:     ModuleName + "." + "subgraph-url",
+		Usage:    "The url of the subgraph to override the internal configuration",
 		Category: strings.ReplaceAll(strings.ToUpper(ModuleName), "_", " "),
 	}
 )
