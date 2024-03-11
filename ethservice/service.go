@@ -745,6 +745,69 @@ func (e *EthService) K2Exit(validatorExit k2common.K2Exit) (tx *types.Transactio
 	return executedTx, nil
 }
 
+func (e *EthService) NativeDelegationCountForNodeOperator(nodeOperatorAddress common.Address) (*big.Int, error) {
+
+	data, err := e.cfg.K2LendingContractABI.Pack("nodeOperatorToBlsPublicKeyCount", nodeOperatorAddress)
+	if err != nil {
+		return nil, err
+	}
+
+	callResult, err := e.client.CallContract(context.Background(), ethereum.CallMsg{
+		From: e.cfg.ValidatorWallets[0].Address,
+		To:   &e.cfg.K2LendingContractAddress,
+		Data: data,
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var callResultDecoded *big.Int
+	err = e.cfg.K2LendingContractABI.UnpackIntoInterface(&callResultDecoded, "nodeOperatorToBlsPublicKeyCount", callResult)
+	if err != nil {
+		return nil, fmt.Errorf("error unpacking nodeOperatorToBlsPublicKeyCount result: %w", err)
+	}
+
+	return callResultDecoded, nil
+}
+
+func (e *EthService) K2ChangeNodeOperatorPayoutAddress(nodeOperator common.Address, newPayoutAddress common.Address) (tx *types.Transaction, err error) {
+
+	if (nodeOperator == common.Address{}) {
+		return nil, fmt.Errorf("nodeOperator address is null address")
+	}
+
+	if (newPayoutAddress == common.Address{}) {
+		return nil, fmt.Errorf("newPayoutAddress is null address")
+	}
+
+	data, err := e.cfg.K2LendingContractABI.Pack("nodeOperatorFeeRecipientUpdate", newPayoutAddress)
+	if err != nil {
+		return nil, err
+	}
+
+	var pk *ecdsa.PrivateKey
+	for _, wallet := range e.cfg.ValidatorWallets {
+		if wallet.Address == nodeOperator {
+			pk = wallet.PrivateKey
+			break
+		}
+	}
+
+	if pk == nil {
+		return nil, fmt.Errorf("nodeOperator wallet not found for address: %s", nodeOperator.String())
+	}
+
+	executedTx, err := e.transactAndWait(context.Background(), types.NewTx(&types.DynamicFeeTx{
+		To:   &e.cfg.K2LendingContractAddress,
+		Data: data,
+	}), pk)
+	if err != nil {
+		return nil, fmt.Errorf("error sending k2 change payout address: %w", err)
+	}
+
+	return executedTx, nil
+}
+
 // K2 Capacity, Limits & Node Operator Inclusion list
 func (e *EthService) K2CheckInclusionList(nodeOperatorRepresentative common.Address) (bool, error) {
 

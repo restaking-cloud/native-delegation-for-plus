@@ -161,9 +161,6 @@ func (k2 *K2Service) parseConfig(moduleFlags common.ModuleFlags) (err error) {
 
 func (k2 *K2Service) checkConfig() error {
 
-	k2.lock.Lock()
-	defer k2.lock.Unlock()
-
 	if !k2.configured {
 		// If not set to run, return
 		return nil

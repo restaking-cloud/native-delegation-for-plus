@@ -21,7 +21,7 @@ type BeaconService struct {
 
 func NewBeaconService() *BeaconService {
 	return &BeaconService{
-		client: &http.Client{Timeout: 6 * time.Second}, // get a response in half a slot
+		client: &http.Client{Timeout: 192 * time.Second},
 	}
 }
 

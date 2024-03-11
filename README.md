@@ -304,6 +304,16 @@ This endpoint is used to register validators on-chain. It offers an alternative 
 ]
 ```
 
+### POST `/eth/v1/update-k2-payout-recipient`
+
+This endpoint is used to update the payout recipient address for a registered node operator in the K2 contract. Node operators can be found in the K2 protocol once they natively delegate a validator. It accepts a JSON body with the BLS Public Key of the validator and the new payout recipient address.
+
+```json
+{
+  "nodeOperator": string,
+  "payoutRecipient": string
+}
+```
 
 
 ## License

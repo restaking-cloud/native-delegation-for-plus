@@ -1381,6 +1381,103 @@ func (k2 *K2Service) getDelegatedValidators(representativeAddresses []common.Add
 	return nodeRunnersList, nil
 }
 
+func (k2 *K2Service) changeK2NodeOperatorPayout(represenative common.Address, newPayoutAddress common.Address) (k2common.ChangedK2PayoutRepresentative, error) {
+	k2.lock.Lock()
+	defer k2.lock.Unlock()
+
+	if k2.cfg.K2LendingContractAddress == (common.Address{}) || k2.cfg.K2NodeOperatorContractAddress == (common.Address{}) {
+		// module not configured to run
+		return k2common.ChangedK2PayoutRepresentative{}, fmt.Errorf("module not configured to run K2 contract operations")
+	}
+
+	// check if the representative is a configured wallet
+	var walletFound bool
+	for _, wallet := range k2.cfg.ValidatorWallets {
+		if strings.EqualFold(wallet.Address.String(), represenative.String()) {
+			walletFound = true
+			break
+		}
+	}
+	if !walletFound {
+		k2.log.WithField("representative", represenative.String()).Error("representative is not a configured wallet")
+		return k2common.ChangedK2PayoutRepresentative{}, fmt.Errorf("representative [%v] is not a configured wallet; cannot change K2 Payout recipient on behalf", represenative.String())
+	}
+
+	// get the old payout address
+	nodeOperatorToPayoutAddress, err := k2.eth1.K2NodeOperatorToPayoutRecipient([]common.Address{represenative})
+	if err != nil {
+		k2.log.WithError(err).Error("failed to get the K2 node operator payout address")
+		return k2common.ChangedK2PayoutRepresentative{}, fmt.Errorf("failed to get the K2 node operator payout address: %w", err)
+	}
+
+	oldPayoutAddress := nodeOperatorToPayoutAddress[represenative.String()]
+
+	if oldPayoutAddress == newPayoutAddress {
+		k2.log.WithFields(logrus.Fields{
+			"representative": represenative.String(),
+			"oldPayout":      oldPayoutAddress.String(),
+			"newPayout":      newPayoutAddress.String(),
+		}).Info("K2 node operator payout address is already set to the new payout address")
+		// do not throw an error, instead since the intended
+		// outcome is already met, return a success
+		return k2common.ChangedK2PayoutRepresentative{
+			RepresentativeAddress: represenative,
+			PreviousFeeRecipient:  oldPayoutAddress,
+			NewFeeRecipient:       newPayoutAddress,
+			Success:               true,
+		}, nil
+	} else if (oldPayoutAddress == common.Address{}) {
+
+		nativeDelegationCount, err := k2.eth1.NativeDelegationCountForNodeOperator(represenative)
+		if err != nil {
+			k2.log.WithError(err).Error("failed to get the native delegation count for the K2 node operator")
+			return k2common.ChangedK2PayoutRepresentative{}, fmt.Errorf("failed to get the native delegation count for the K2 node operator: %w", err)
+		}
+
+		if nativeDelegationCount.Sign() > 0 {
+			k2.log.WithFields(logrus.Fields{
+				"representative": represenative.String(),
+				"oldPayout":      oldPayoutAddress.String(),
+				"newPayout":      newPayoutAddress.String(),
+			}).Errorf("K2 node operator payout address is null, but the node operator has %v native delegations", nativeDelegationCount.String())
+			// this should not be the case as the node operator should have a payout address set
+			// due to the native delegations, however means the node operator is in the
+			// k2 contract so can attempt to change the payout address
+		} else {
+			k2.log.WithFields(logrus.Fields{
+				"representative": represenative.String(),
+			}).Info("K2 node operator is not in the K2 contract")
+			return k2common.ChangedK2PayoutRepresentative{}, fmt.Errorf("node operator is not in the K2 contract")
+		}
+	}
+
+	k2.log.WithFields(logrus.Fields{
+		"representative": represenative.String(),
+		"oldPayout":      oldPayoutAddress.String(),
+		"newPayout":      newPayoutAddress.String(),
+	}).Info("Changing K2 node operator payout address")
+
+	tx, err := k2.eth1.K2ChangeNodeOperatorPayoutAddress(represenative, newPayoutAddress)
+	if err != nil {
+		k2.log.WithError(err).Error("failed to change the K2 node operator payout address")
+		return k2common.ChangedK2PayoutRepresentative{}, fmt.Errorf("failed to change the K2 node operator payout address: %w", err)
+	}
+	k2.log.WithFields(logrus.Fields{
+		"representative": represenative.String(),
+		"newPayout":      newPayoutAddress.String(),
+		"txHash":         tx.Hash().String(),
+	}).Info("K2 node operator payout address change transaction completed")
+
+	return k2common.ChangedK2PayoutRepresentative{
+		RepresentativeAddress: represenative,
+		PreviousFeeRecipient:  oldPayoutAddress,
+		NewFeeRecipient:       newPayoutAddress,
+		TxHash:                tx.Hash(),
+		Success:               true,
+	}, nil
+
+}
+
 func (k2 *K2Service) batchProcessClaims(representativeAddresses []common.Address) ([]k2common.K2Claim, error) {
 
 	if k2.cfg.K2LendingContractAddress == (common.Address{}) {

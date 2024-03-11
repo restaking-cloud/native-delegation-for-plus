@@ -23,7 +23,7 @@ type Web3SignerService struct {
 
 func NewWeb3SignerService() *Web3SignerService {
 	return &Web3SignerService{
-		client: &http.Client{Timeout: 6 * time.Second}, // get a response in half a slot
+		client: &http.Client{Timeout: 192 * time.Second},
 	}
 }
 

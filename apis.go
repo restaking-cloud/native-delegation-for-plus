@@ -18,6 +18,7 @@ const (
 	pathClaim                  = "/eth/v1/claim"
 	pathRegister               = "/eth/v1/register"
 	pathGetDelegatedValidators = "/eth/v1/delegated-validators"
+	pathUpdateK2Payout         = "/eth/v1/update-k2-payout-recipient"
 )
 
 func (k2 *K2Service) handleRoot(w http.ResponseWriter, _ *http.Request) {
@@ -82,6 +83,40 @@ func (k2 *K2Service) handleClaim(w http.ResponseWriter, r *http.Request) {
 	if len(result) == 0 {
 		// force return an empty array instead of null
 		k2.respondOK(w, []string{})
+		return
+	}
+
+	k2.respondOK(w, result)
+
+}
+
+func (k2 *K2Service) handleUpdateK2Payout(w http.ResponseWriter, r *http.Request) {
+	// Post call.
+	// Handles the change of the payout recipient for a validator in the K2 contract.
+
+	type changeK2PayoutPayload struct {
+		NodeOperator    common.Address `json:"nodeOperator"`
+		PayoutRecipient common.Address `json:"payoutRecipient"`
+	}
+
+	payload := changeK2PayoutPayload{}
+
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	err := decoder.Decode(&payload)
+	if err != nil {
+		k2.respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if (payload.NodeOperator == common.Address{} || payload.PayoutRecipient == common.Address{}) {
+		k2.respondError(w, http.StatusBadRequest, "nodeOperator and payoutRecipient are required")
+		return
+	}
+
+	result, err := k2.changeK2NodeOperatorPayout(payload.NodeOperator, payload.PayoutRecipient)
+	if err != nil {
+		k2.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 

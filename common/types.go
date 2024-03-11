@@ -143,3 +143,11 @@ func (n *NodeRunnerInfo) MarshalJSON() ([]byte, error) {
 		DelegatedValidators:   n.DelegatedValidators,
 	})
 }
+
+type ChangedK2PayoutRepresentative struct {
+	RepresentativeAddress common.Address `json:"representativeAddress"`
+	PreviousFeeRecipient  common.Address `json:"previousFeeRecipient"`
+	NewFeeRecipient       common.Address `json:"newFeeRecipient"`
+	TxHash                common.Hash    `json:"txHash"`
+	Success               bool           `json:"success"`
+}

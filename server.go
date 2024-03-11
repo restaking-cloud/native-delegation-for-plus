@@ -42,6 +42,7 @@ func (k2 *K2Service) getRouter() http.Handler {
 	r.HandleFunc(pathExit, k2.handleExit).Methods(http.MethodPost)
 	r.HandleFunc(pathClaim, k2.handleClaim).Methods(http.MethodPost)
 	r.HandleFunc(pathRegister, k2.handleRegister).Methods(http.MethodPost)
+	r.HandleFunc(pathUpdateK2Payout, k2.handleUpdateK2Payout).Methods(http.MethodPost)
 	r.HandleFunc(pathGetDelegatedValidators, k2.handleGetValidators).Methods(http.MethodGet)
 
 	r.Use(mux.CORSMethodMiddleware(r))
