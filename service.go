@@ -75,7 +75,7 @@ func NewK2Service() *K2Service {
 	}
 }
 
-func NewCommand() *cli.Command {
+func (k2 *K2Service) CliCommand() *cli.Command {
 	return config.NewCommand()
 }
 
